@@ -1,0 +1,507 @@
+// Java Code Obfuscator & De-Obfuscator Engine
+
+export interface ObfuscatorOptions {
+  namingStyle: 'alphabetical' | 'hexadecimal' | 'customPrefix' | 'numeric';
+  customClassPrefix?: string;
+  customVarPrefix?: string;
+  customMethodPrefix?: string;
+  obfuscateClasses: boolean;
+  obfuscateVariables: boolean;
+  obfuscateMethods: boolean;
+  obfuscatePackages: boolean;
+  encryptStrings: boolean;
+  stripComments: boolean;
+  preserveMain: boolean;
+  preserveGettersSetters: boolean;
+  preserveAnnotated: boolean;
+  excludedPackages: string[];
+  customExclusions: string[];
+}
+
+export interface JavaObfuscationMapping {
+  classes: Record<string, string>; // Original -> Obfuscated
+  variables: Record<string, string>;
+  methods: Record<string, string>;
+  packages: Record<string, string>;
+  reverseMapping: Record<string, string>; // Obfuscated -> Original
+}
+
+export interface JavaObfuscationResult {
+  obfuscatedCode: string;
+  mapping: JavaObfuscationMapping;
+  stats: {
+    originalSize: number;
+    obfuscatedSize: number;
+    classesRenamed: number;
+    variablesRenamed: number;
+    methodsRenamed: number;
+    packagesRenamed: number;
+  };
+}
+
+export const DEFAULT_EXCLUDED_PACKAGES = [
+  'java.',
+  'javax.',
+  'jakarta.',
+  'org.springframework.',
+  'android.',
+  'androidx.',
+  'org.junit.',
+  'com.fasterxml.jackson.',
+  'org.slf4j.',
+  'com.google.',
+  'org.apache.',
+  'lombok.',
+];
+
+export const DEFAULT_JAVA_KEYWORDS = new Set([
+  'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch', 'char', 'class', 'const',
+  'continue', 'default', 'do', 'double', 'else', 'enum', 'extends', 'final', 'finally', 'float',
+  'for', 'goto', 'if', 'implements', 'import', 'instanceof', 'int', 'interface', 'long', 'native',
+  'new', 'package', 'private', 'protected', 'public', 'return', 'short', 'static', 'strictfp',
+  'super', 'switch', 'synchronized', 'this', 'throw', 'throws', 'transient', 'try', 'void',
+  'volatile', 'while', 'record', 'sealed', 'non-sealed', 'permits', 'var', 'yield', 'true',
+  'false', 'null',
+  // Java Standard Types
+  'String', 'Object', 'Integer', 'Long', 'Boolean', 'Double', 'Float', 'Byte', 'Short', 'Character', 'Number', 'Void',
+  'List', 'ArrayList', 'LinkedList', 'Map', 'HashMap', 'TreeMap', 'Set', 'HashSet', 'TreeSet', 'Collection', 'Collections', 'Arrays', 'Vector', 'Stack',
+  'Optional', 'Stream', 'Collectors', 'Collector', 'Iterator', 'Iterable',
+  'System', 'Math', 'Thread', 'Runnable', 'Callable', 'Future', 'CompletableFuture', 'Executor', 'Executors',
+  'Exception', 'RuntimeException', 'Throwable', 'Error', 'IllegalArgumentException', 'IllegalStateException', 'NullPointerException', 'IndexOutOfBoundsException', 'IOException',
+  'Override', 'Deprecated', 'SuppressWarnings', 'FunctionalInterface', 'SafeVarargs',
+  'Date', 'Calendar', 'TimeZone', 'Instant', 'Duration', 'LocalDate', 'LocalDateTime', 'ZonedDateTime', 'LocalTime', 'DateTimeFormatter',
+  'UUID', 'BigInteger', 'BigDecimal', 'Base64',
+  'InputStream', 'OutputStream', 'FileInputStream', 'FileOutputStream', 'BufferedReader', 'BufferedWriter', 'File', 'Path', 'Paths', 'Files', 'StringBuilder', 'StringBuffer',
+  'Logger', 'LoggerFactory', 'Log',
+  // Spring Framework Annotations & Types
+  'RestController', 'Controller', 'Service', 'Component', 'Repository', 'Bean', 'Configuration', 'Autowired', 'Qualifier', 'Value',
+  'RequestMapping', 'GetMapping', 'PostMapping', 'PutMapping', 'DeleteMapping', 'PatchMapping', 'PathVariable', 'RequestParam', 'RequestBody', 'ResponseBody', 'RequestHeader',
+  'SpringBootApplication', 'EnableAutoConfiguration', 'ComponentScan', 'SpringBootTest',
+  'Valid', 'NotNull', 'NotBlank', 'NotEmpty', 'Size', 'Min', 'Max',
+  'ResponseEntity', 'HttpStatus', 'HttpHeaders',
+  // JPA / Jakarta / Hibernate
+  'Entity', 'Table', 'Id', 'GeneratedValue', 'Column', 'Transient', 'ManyToOne', 'OneToMany', 'ManyToMany', 'JoinColumn', 'Embedded', 'Embeddable',
+  // Jackson / Gson / Lombok
+  'JsonProperty', 'JsonIgnore', 'JsonInclude', 'Getter', 'Setter', 'NoArgsConstructor', 'AllArgsConstructor', 'RequiredArgsConstructor', 'Builder', 'Data', 'EqualsAndHashCode', 'ToString', 'Slf4j',
+  // Android
+  'Bundle', 'AppCompatActivity', 'Activity', 'Fragment', 'Context', 'Intent', 'View', 'TextView', 'Button', 'ImageView', 'Toast', 'SavedState', 'Lifecycle', 'ViewModel',
+  // JUnit / Testing
+  'Test', 'BeforeEach', 'AfterEach', 'BeforeAll', 'AfterAll', 'DisplayName', 'Nested', 'Disabled', 'ExtendWith', 'Mock', 'InjectMocks', 'Mockito', 'Assert', 'Assertions',
+  'main', 'args', 'toString', 'equals', 'hashCode', 'clone', 'getClass', 'notify', 'notifyAll', 'wait'
+]);
+
+// Helper to generate obfuscated names
+function generateName(
+  idx: number,
+  category: 'class' | 'variable' | 'method' | 'package',
+  style: ObfuscatorOptions['namingStyle'],
+  customPrefix?: string
+): string {
+  if (style === 'customPrefix') {
+    const prefix = customPrefix || (category === 'class' ? 'Cls' : category === 'method' ? 'mth' : category === 'package' ? 'pkg' : 'var');
+    return `${prefix}_${idx + 1}`;
+  }
+
+  if (style === 'hexadecimal') {
+    const pfx = category === 'class' ? '_0xC' : category === 'method' ? '_0xm' : category === 'package' ? '_0xp' : '_0xv';
+    return `${pfx}${(idx + 1).toString(16)}`;
+  }
+
+  if (style === 'numeric') {
+    const pfx = category === 'class' ? 'C' : category === 'method' ? 'm' : category === 'package' ? 'pkg' : 'v';
+    return `${pfx}${idx + 1}`;
+  }
+
+  // Default: Alphabetical
+  if (category === 'class') {
+    let name = '';
+    let n = idx;
+    while (n >= 0) {
+      name = String.fromCharCode(65 + (n % 26)) + name;
+      n = Math.floor(n / 26) - 1;
+    }
+    return name;
+  } else if (category === 'package') {
+    let name = '';
+    let n = idx;
+    while (n >= 0) {
+      name = String.fromCharCode(97 + (n % 26)) + name;
+      n = Math.floor(n / 26) - 1;
+    }
+    return `pkg_${name}`;
+  } else if (category === 'method') {
+    let name = '';
+    let n = idx;
+    while (n >= 0) {
+      name = String.fromCharCode(97 + (n % 26)) + name;
+      n = Math.floor(n / 26) - 1;
+    }
+    return name;
+  } else {
+    // variable
+    let name = '';
+    let n = idx;
+    while (n >= 0) {
+      name = String.fromCharCode(97 + (n % 26)) + name;
+      n = Math.floor(n / 26) - 1;
+    }
+    return `v_${name}`;
+  }
+}
+
+export function obfuscateJavaCode(
+  input: string,
+  options: Partial<ObfuscatorOptions> = {},
+  existingMapping?: JavaObfuscationMapping
+): JavaObfuscationResult {
+  const opts: ObfuscatorOptions = {
+    namingStyle: options.namingStyle || 'alphabetical',
+    customClassPrefix: options.customClassPrefix || 'Cls',
+    customVarPrefix: options.customVarPrefix || 'v',
+    customMethodPrefix: options.customMethodPrefix || 'm',
+    obfuscateClasses: options.obfuscateClasses !== false,
+    obfuscateVariables: options.obfuscateVariables !== false,
+    obfuscateMethods: options.obfuscateMethods !== false,
+    obfuscatePackages: options.obfuscatePackages !== false,
+    encryptStrings: Boolean(options.encryptStrings),
+    stripComments: options.stripComments !== false,
+    preserveMain: options.preserveMain !== false,
+    preserveGettersSetters: options.preserveGettersSetters !== false,
+    preserveAnnotated: options.preserveAnnotated !== false,
+    excludedPackages: options.excludedPackages || DEFAULT_EXCLUDED_PACKAGES,
+    customExclusions: options.customExclusions || [],
+  };
+
+  const originalSize = new Blob([input]).size;
+  if (!input.trim()) {
+    return {
+      obfuscatedCode: '',
+      mapping: { classes: {}, variables: {}, methods: {}, packages: {}, reverseMapping: {} },
+      stats: {
+        originalSize: 0,
+        obfuscatedSize: 0,
+        classesRenamed: 0,
+        variablesRenamed: 0,
+        methodsRenamed: 0,
+        packagesRenamed: 0,
+      },
+    };
+  }
+
+  let code = input;
+
+  // 1. Strip comments if configured
+  if (opts.stripComments) {
+    code = code.replace(/\/\*[\s\S]*?\*\//g, '');
+    code = code.replace(/\/\/.*$/gm, '');
+  }
+
+  // Mask string literals to prevent token replacement inside strings
+  const stringLiterals: string[] = [];
+  const stringPlaceholderPrefix = '___STR_PLACEHOLDER_';
+  code = code.replace(/"([^"\\]*(\\.[^"\\]*)*)"/g, (match) => {
+    const placeholder = `${stringPlaceholderPrefix}${stringLiterals.length}___`;
+    stringLiterals.push(match);
+    return placeholder;
+  });
+
+  const exclusionSet = new Set([
+    ...DEFAULT_JAVA_KEYWORDS,
+    ...(opts.customExclusions || []),
+  ]);
+
+  const mapping: JavaObfuscationMapping = existingMapping
+    ? { ...existingMapping, reverseMapping: { ...existingMapping.reverseMapping } }
+    : { classes: {}, variables: {}, methods: {}, packages: {}, reverseMapping: {} };
+
+  let classCount = Object.keys(mapping.classes).length;
+  let varCount = Object.keys(mapping.variables).length;
+  let methodCount = Object.keys(mapping.methods).length;
+  let pkgCount = Object.keys(mapping.packages).length;
+
+  // 2. Package Obfuscation
+  if (opts.obfuscatePackages) {
+    code = code.replace(/(package\s+)([\w.]+)(;)/g, (match, prefix, pkgName, suffix) => {
+      const isExcluded = opts.excludedPackages.some((p) => pkgName.startsWith(p));
+      if (isExcluded) return match;
+
+      const parts = pkgName.split('.');
+      const obfuscatedParts = parts.map((part: string) => {
+        if (exclusionSet.has(part)) return part;
+        if (!mapping.packages[part]) {
+          const newPkg = generateName(pkgCount++, 'package', opts.namingStyle, opts.customVarPrefix);
+          mapping.packages[part] = newPkg;
+          mapping.reverseMapping[newPkg] = part;
+        }
+        return mapping.packages[part];
+      });
+
+      return `${prefix}${obfuscatedParts.join('.')}${suffix}`;
+    });
+  }
+
+  // 3. Class/Interface/Enum/Record & Referenced Custom Types Obfuscation
+  if (opts.obfuscateClasses) {
+    // 3a. Declared classes/interfaces/enums/records
+    const classRegex = /\b(class|interface|enum|record)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g;
+    let match: RegExpExecArray | null;
+    while ((match = classRegex.exec(code)) !== null) {
+      const className = match[2];
+      if (!exclusionSet.has(className) && !mapping.classes[className]) {
+        const newClass = generateName(classCount++, 'class', opts.namingStyle, opts.customClassPrefix);
+        mapping.classes[className] = newClass;
+        mapping.reverseMapping[newClass] = className;
+      }
+    }
+
+    // 3b. Single imports: import com.acme.service.PaymentService;
+    const importRegex = /\bimport\s+([\w.]+)\.([A-Za-z_$][A-Za-z0-9_$]*)\s*;/g;
+    while ((match = importRegex.exec(code)) !== null) {
+      const pkgPath = match[1] + '.';
+      const className = match[2];
+
+      const isExcludedPkg = opts.excludedPackages.some((p) => pkgPath.startsWith(p));
+      if (!isExcludedPkg && !exclusionSet.has(className) && !mapping.classes[className]) {
+        const newClass = generateName(classCount++, 'class', opts.namingStyle, opts.customClassPrefix);
+        mapping.classes[className] = newClass;
+        mapping.reverseMapping[newClass] = className;
+      }
+    }
+
+    // 3c. Scan for referenced custom class names in fields, return types, parameters, generics & instantiations
+    const customTypeRegex = /\b([A-Z][A-Za-z0-9_$]*)\b/g;
+    while ((match = customTypeRegex.exec(code)) !== null) {
+      const className = match[1];
+
+      if (exclusionSet.has(className) || mapping.classes[className]) continue;
+
+      // Check if preceded by @ (annotation)
+      const prevCharIndex = match.index - 1;
+      let isAnnotation = false;
+      for (let i = prevCharIndex; i >= 0; i--) {
+        const ch = code[i];
+        if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') continue;
+        if (ch === '@') {
+          isAnnotation = true;
+        }
+        break;
+      }
+
+      if (isAnnotation) continue;
+
+      const newClass = generateName(classCount++, 'class', opts.namingStyle, opts.customClassPrefix);
+      mapping.classes[className] = newClass;
+      mapping.reverseMapping[newClass] = className;
+    }
+  }
+
+  // 4. Method Obfuscation
+  if (opts.obfuscateMethods) {
+    // Collect annotated lines if preserveAnnotated is set
+    const annotatedLines = new Set<number>();
+    const lines = code.split('\n');
+    lines.forEach((line, idx) => {
+      if (/@(Override|Test|GetMapping|PostMapping|PutMapping|DeleteMapping|RequestMapping|Autowired|JsonProperty|Value|Column|Id|NotNull|NotBlank)/.test(line)) {
+        annotatedLines.add(idx + 1); // target next line
+      }
+    });
+
+    // Match method declarations: [modifiers] [ReturnType] methodName([params])
+    const methodRegex = /\b(public|protected|private|static|final|synchronized|native|\s)+[\w<>\[\]]+\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g;
+    let match: RegExpExecArray | null;
+    while ((match = methodRegex.exec(code)) !== null) {
+      const methodName = match[2];
+
+      // Check if preserved
+      if (exclusionSet.has(methodName)) continue;
+      if (opts.preserveMain && methodName === 'main') continue;
+      if (opts.preserveGettersSetters && /^(get|set|is)[A-Z]/.test(methodName)) continue;
+
+      // Check line index for annotations
+      const lineNum = code.substring(0, match.index).split('\n').length;
+      if (opts.preserveAnnotated && (annotatedLines.has(lineNum) || annotatedLines.has(lineNum - 1))) {
+        continue;
+      }
+
+      if (!mapping.methods[methodName]) {
+        const newMethod = generateName(methodCount++, 'method', opts.namingStyle, opts.customMethodPrefix);
+        mapping.methods[methodName] = newMethod;
+        mapping.reverseMapping[newMethod] = methodName;
+      }
+    }
+  }
+
+  // 5. Variable Obfuscation (fields, local variables, parameters)
+  if (opts.obfuscateVariables) {
+    // Match declarations like: Type varName = or Type varName; or (Type varName, Type var2)
+    const varRegex = /\b([A-Z][A-Za-z0-9_<>,]*|int|long|boolean|double|float|char|byte|short|var)\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\s*([=;,)]|\b)/g;
+    let match: RegExpExecArray | null;
+    while ((match = varRegex.exec(code)) !== null) {
+      const varName = match[2];
+      if (!exclusionSet.has(varName) && !mapping.methods[varName] && !mapping.classes[varName]) {
+        if (!mapping.variables[varName]) {
+          const newVar = generateName(varCount++, 'variable', opts.namingStyle, opts.customVarPrefix);
+          mapping.variables[varName] = newVar;
+          mapping.reverseMapping[newVar] = varName;
+        }
+      }
+    }
+  }
+
+  // 6. Apply Replacements to Code
+  // Replace Classes first (longer names first)
+  Object.entries(mapping.classes)
+    .sort((a, b) => b[0].length - a[0].length)
+    .forEach(([orig, obfuscated]) => {
+      const regex = new RegExp(`\\b${orig}\\b`, 'g');
+      code = code.replace(regex, obfuscated);
+    });
+
+  // Replace Methods
+  Object.entries(mapping.methods)
+    .sort((a, b) => b[0].length - a[0].length)
+    .forEach(([orig, obfuscated]) => {
+      const regex = new RegExp(`\\b${orig}\\b`, 'g');
+      code = code.replace(regex, obfuscated);
+    });
+
+  // Replace Variables
+  Object.entries(mapping.variables)
+    .sort((a, b) => b[0].length - a[0].length)
+    .forEach(([orig, obfuscated]) => {
+      const regex = new RegExp(`\\b${orig}\\b`, 'g');
+      code = code.replace(regex, obfuscated);
+    });
+
+  // Replace Packages inside imports/qualified names
+  if (opts.obfuscatePackages) {
+    Object.entries(mapping.packages)
+      .sort((a, b) => b[0].length - a[0].length)
+      .forEach(([orig, obfuscated]) => {
+        const regex = new RegExp(`\\b${orig}\\b`, 'g');
+        code = code.replace(regex, obfuscated);
+      });
+  }
+
+  // 7. Unmask / Encrypt String Literals
+  stringLiterals.forEach((literal, idx) => {
+    const placeholder = `${stringPlaceholderPrefix}${idx}___`;
+    if (opts.encryptStrings) {
+      const rawString = literal.substring(1, literal.length - 1);
+      const b64 = btoa(rawString);
+      const encryptedExpr = `new String(java.util.Base64.getDecoder().decode("${b64}"))`;
+      code = code.replace(placeholder, encryptedExpr);
+    } else {
+      code = code.replace(placeholder, literal);
+    }
+  });
+
+  const obfuscatedSize = new Blob([code]).size;
+
+  return {
+    obfuscatedCode: code,
+    mapping,
+    stats: {
+      originalSize,
+      obfuscatedSize,
+      classesRenamed: Object.keys(mapping.classes).length,
+      variablesRenamed: Object.keys(mapping.variables).length,
+      methodsRenamed: Object.keys(mapping.methods).length,
+      packagesRenamed: Object.keys(mapping.packages).length,
+    },
+  };
+}
+
+export function deobfuscateJavaCode(
+  inputCode: string,
+  mapping: JavaObfuscationMapping | Record<string, string>
+): string {
+  if (!inputCode.trim()) return '';
+
+  const reverseMap: Record<string, string> = {};
+
+  if (mapping && typeof mapping === 'object') {
+    // 1a. If mapping has reverseMapping with entries, use obf -> orig
+    if ('reverseMapping' in mapping && mapping.reverseMapping && typeof mapping.reverseMapping === 'object') {
+      Object.entries(mapping.reverseMapping).forEach(([obf, orig]) => {
+        if (obf && orig && typeof obf === 'string' && typeof orig === 'string') {
+          reverseMap[obf.trim()] = orig.trim();
+        }
+      });
+    }
+
+    // 1b. Also collect from categories (classes, variables, methods, packages) where orig -> obf
+    const categoryMaps = [
+      (mapping as JavaObfuscationMapping).classes,
+      (mapping as JavaObfuscationMapping).variables,
+      (mapping as JavaObfuscationMapping).methods,
+      (mapping as JavaObfuscationMapping).packages,
+    ];
+
+    categoryMaps.forEach((catMap) => {
+      if (catMap && typeof catMap === 'object') {
+        Object.entries(catMap).forEach(([orig, obf]) => {
+          if (orig && obf && typeof orig === 'string' && typeof obf === 'string') {
+            const trimmedObf = obf.trim();
+            const trimmedOrig = orig.trim();
+            if (!reverseMap[trimmedObf]) {
+              reverseMap[trimmedObf] = trimmedOrig;
+            }
+          }
+        });
+      }
+    });
+
+    // 1c. If reverseMap is still empty or flat object with simple key-value entries
+    const knownKeys = new Set(['classes', 'variables', 'methods', 'packages', 'reverseMapping']);
+    Object.entries(mapping).forEach(([k, v]) => {
+      if (knownKeys.has(k)) return;
+      if (typeof k !== 'string' || !v) return;
+
+      const kStr = k.trim();
+      const vStr = String(v).trim();
+
+      // Check which key is in inputCode to determine obfuscated token
+      if (inputCode.includes(kStr)) {
+        reverseMap[kStr] = vStr;
+      } else if (inputCode.includes(vStr)) {
+        reverseMap[vStr] = kStr;
+      } else {
+        if (!reverseMap[kStr]) {
+          reverseMap[kStr] = vStr;
+        }
+      }
+    });
+  }
+
+  // 2. Filter out empty or self-referential keys
+  const validKeys = Object.keys(reverseMap)
+    .filter((k) => k && reverseMap[k] && k !== reverseMap[k])
+    .sort((a, b) => b.length - a.length);
+
+  if (validKeys.length === 0) return inputCode;
+
+  let code = inputCode;
+
+  // 3. Single-pass token replacement using negative lookbehind and lookahead
+  const escapedKeys = validKeys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const regex = new RegExp(`(?<![a-zA-Z0-9_$])(?:${escapedKeys.join('|')})(?![a-zA-Z0-9_$])`, 'g');
+
+  code = code.replace(regex, (matched) => {
+    return reverseMap[matched] || matched;
+  });
+
+  // 4. Decrypt Base64 string expressions if present
+  code = code.replace(
+    /new\s+String\s*\(\s*java\.util\.Base64\.getDecoder\(\)\.decode\(\s*"([A-Za-z0-9+/=]+)"\s*\)\s*\)/g,
+    (_, b64) => {
+      try {
+        return `"${atob(b64)}"`;
+      } catch {
+        return _;
+      }
+    }
+  );
+
+  return code;
+}
