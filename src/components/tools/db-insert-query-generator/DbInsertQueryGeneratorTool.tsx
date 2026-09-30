@@ -187,6 +187,7 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
       id: newId,
       name: `field_${options.columns.length + 1}`,
       type: 'varchar',
+      maxLength: 255,
       nullable: true,
       hasDefault: false,
       isPrimaryKey: false,
@@ -244,7 +245,22 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
   const handleUpdateColumn = (id: string, updates: Partial<InsertColumnConfig>) => {
     setOptions((prev) => ({
       ...prev,
-      columns: prev.columns.map((c) => (c.id === id ? { ...c, ...updates } : c)),
+      columns: prev.columns.map((c) => {
+        if (c.id !== id) return c;
+        const updated = { ...c, ...updates };
+        // If type changed, provide smart defaults for size constraints if not already set
+        if (updates.type && updates.type !== c.type) {
+          if (['varchar', 'character varying'].includes(updates.type) && !updated.maxLength) {
+            updated.maxLength = 255;
+          } else if (updates.type === 'character' && !updated.maxLength) {
+            updated.maxLength = 10;
+          } else if (['numeric', 'decimal'].includes(updates.type) && !updated.precision) {
+            updated.precision = 10;
+            updated.scale = 2;
+          }
+        }
+        return updated;
+      }),
     }));
   };
 
@@ -559,6 +575,72 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
                             </option>
                           ))}
                         </select>
+
+                        {/* Size Constraints Inputs: Length for VARCHAR/CHAR, Precision & Scale for NUMERIC/DECIMAL */}
+                        {(col.type === 'character varying' || col.type === 'varchar' || col.type === 'character') && (
+                          <div
+                            className="flex items-center gap-1 bg-slate-100 dark:bg-slate-950 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-800 text-[11px]"
+                            title="Maximum string length constraint (e.g. 25 for character varying(25))"
+                          >
+                            <span className="text-slate-400 font-mono text-[10px]">len:</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={10485760}
+                              value={col.maxLength !== undefined ? col.maxLength : ''}
+                              onChange={(e) => {
+                                const val = e.target.value ? parseInt(e.target.value, 10) : undefined;
+                                handleUpdateColumn(col.id, { maxLength: val && val > 0 ? val : undefined });
+                              }}
+                              placeholder="e.g. 25"
+                              className="w-14 bg-transparent text-slate-700 dark:text-slate-300 font-mono text-xs focus:outline-none"
+                            />
+                            {col.maxLength && (
+                              <span className="text-[9px] font-mono px-1 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 font-semibold border border-indigo-200 dark:border-indigo-800/60">
+                                max {col.maxLength}
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        {(col.type === 'numeric' || col.type === 'decimal') && (
+                          <div
+                            className="flex items-center gap-1 bg-slate-100 dark:bg-slate-950 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-800 text-[11px]"
+                            title="NUMERIC(precision, scale): e.g. precision=2 for numeric(2), or precision=10, scale=2"
+                          >
+                            <span className="text-slate-400 font-mono text-[10px]">p:</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={1000}
+                              value={col.precision !== undefined ? col.precision : ''}
+                              onChange={(e) => {
+                                const val = e.target.value ? parseInt(e.target.value, 10) : undefined;
+                                handleUpdateColumn(col.id, { precision: val && val > 0 ? val : undefined });
+                              }}
+                              placeholder="prec"
+                              className="w-10 bg-transparent text-slate-700 dark:text-slate-300 font-mono text-xs focus:outline-none"
+                            />
+                            <span className="text-slate-400 font-mono text-[10px] ml-0.5">s:</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={1000}
+                              value={col.scale !== undefined ? col.scale : ''}
+                              onChange={(e) => {
+                                const val = e.target.value !== '' ? parseInt(e.target.value, 10) : undefined;
+                                handleUpdateColumn(col.id, { scale: val !== undefined && val >= 0 ? val : undefined });
+                              }}
+                              placeholder="scale"
+                              className="w-10 bg-transparent text-slate-700 dark:text-slate-300 font-mono text-xs focus:outline-none"
+                            />
+                            {col.precision && (
+                              <span className="text-[9px] font-mono px-1 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 font-semibold border border-emerald-200 dark:border-emerald-800/60">
+                                max {Math.max(0, col.precision - (col.scale ?? 0)) > 0 ? Math.pow(10, col.precision - (col.scale ?? 0)) - 1 : 0}
+                              </span>
+                            )}
+                          </div>
+                        )}
 
                         {/* Primary Key / Unique Badges */}
                         <button
@@ -1262,6 +1344,22 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
               <button
                 type="button"
                 onClick={() =>
+                  setDdlInputText(`CREATE TABLE "inventory_items" (
+  sku CHARACTER VARYING (25) PRIMARY KEY,
+  category_code VARCHAR(10) NOT NULL,
+  rating NUMERIC(2) NOT NULL,
+  unit_price NUMERIC(8, 2) NOT NULL,
+  short_desc CHARACTER(25),
+  in_stock BOOLEAN DEFAULT TRUE
+);`)
+                }
+                className="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:text-indigo-600 text-[11px] font-medium"
+              >
+                Inventory (VARCHAR(25) &amp; NUMERIC(2))
+              </button>
+              <button
+                type="button"
+                onClick={() =>
                   setDdlInputText(`CREATE TABLE "security_events" (
   event_id BIGSERIAL PRIMARY KEY,
   client_ip INET NOT NULL,
@@ -1272,7 +1370,7 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
                 }
                 className="px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:text-indigo-600 text-[11px] font-medium"
               >
-                Audit Logs (BIGSERIAL & INET)
+                Audit Logs (BIGSERIAL &amp; INET)
               </button>
             </div>
 
@@ -1336,6 +1434,9 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
           onClose={() => setEditingPoolCol(null)}
           columnName={editingPoolCol.name}
           columnType={editingPoolCol.type}
+          maxLength={editingPoolCol.maxLength}
+          precision={editingPoolCol.precision}
+          scale={editingPoolCol.scale}
           initialValues={editingPoolCol.valuePool || []}
           onSave={(newValues) => {
             handleUpdateColumn(editingPoolCol.id, { valuePool: newValues });

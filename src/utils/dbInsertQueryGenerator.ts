@@ -77,6 +77,9 @@ export interface InsertColumnConfig {
   id: string;
   name: string;
   type: PostgresInsertType;
+  maxLength?: number;
+  precision?: number;
+  scale?: number;
   nullable: boolean;
   hasDefault: boolean;
   isPrimaryKey: boolean;
@@ -170,6 +173,7 @@ export const DEFAULT_INSERT_OPTIONS: InsertQueryOptions = {
       id: 'col_2',
       name: 'business_name',
       type: 'varchar',
+      maxLength: 255,
       nullable: false,
       hasDefault: false,
       isPrimaryKey: false,
@@ -184,6 +188,7 @@ export const DEFAULT_INSERT_OPTIONS: InsertQueryOptions = {
       id: 'col_3',
       name: 'current_category',
       type: 'varchar',
+      maxLength: 50,
       nullable: false,
       hasDefault: false,
       isPrimaryKey: false,
@@ -213,6 +218,8 @@ export const DEFAULT_INSERT_OPTIONS: InsertQueryOptions = {
       id: 'col_5',
       name: 'annual_turnover',
       type: 'numeric',
+      precision: 12,
+      scale: 2,
       nullable: true,
       hasDefault: false,
       isPrimaryKey: false,
@@ -274,12 +281,71 @@ const SAMPLE_CITIES = ['New York', 'London', 'Berlin', 'Tokyo', 'San Francisco',
 const SAMPLE_COUNTRIES = ['US', 'GB', 'DE', 'FR', 'JP', 'CA', 'AU', 'SG', 'CH', 'NL'];
 
 /**
+ * Clamps or fits a string value to a maximum length constraint (e.g. character varying(25) -> max 25 chars)
+ */
+export function clampStringToMaxLength(str: string, maxLength?: number): string {
+  if (maxLength !== undefined && maxLength > 0 && str.length > maxLength) {
+    return str.slice(0, maxLength);
+  }
+  return str;
+}
+
+/**
+ * Constrains a numeric value or string to PostgreSQL NUMERIC(precision, scale) bounds.
+ * Example: numeric(2) -> precision=2, scale=0 -> max value 99, 0 decimal places.
+ * Example: numeric(10, 2) -> precision=10, scale=2 -> max value 99999999.99, 2 decimal places.
+ */
+export function clampNumericToPrecisionScale(
+  val: any,
+  precision?: number,
+  scale = 0,
+  rowIndex = 0
+): { formatted: string; num: number } {
+  if (precision === undefined || precision <= 0) {
+    const cleaned = String(val).replace(/[^0-9.-]/g, '');
+    const num = parseFloat(cleaned);
+    const n = isNaN(num) ? 0 : num;
+    return { formatted: isNaN(num) ? '0.00' : String(n), num: n };
+  }
+
+  const s = Math.max(0, scale);
+  const intDigits = Math.max(0, precision - s);
+
+  // Maximum allowed value in Postgres: 10^(precision - scale) - 10^(-scale)
+  const maxAllowed = intDigits > 0
+    ? Math.pow(10, intDigits) - (s > 0 ? Math.pow(10, -s) : 1)
+    : 1 - Math.pow(10, -s);
+  const minAllowed = -maxAllowed;
+
+  let cleaned = String(val).replace(/[^0-9.-]/g, '');
+  let num = parseFloat(cleaned);
+
+  if (isNaN(num)) {
+    const maxInt = intDigits > 0 ? Math.pow(10, intDigits) - 1 : 0;
+    const base = intDigits > 0 ? ((rowIndex % Math.max(1, maxInt)) + 1) : 0;
+    const frac = s > 0 ? Math.pow(10, -s) : 0;
+    num = base + frac;
+  }
+
+  // Strictly clamp within allowed Postgres bounds
+  if (num > maxAllowed) {
+    num = maxAllowed;
+  } else if (num < minAllowed) {
+    num = minAllowed;
+  }
+
+  const formatted = num.toFixed(s);
+  return { formatted, num: parseFloat(formatted) };
+}
+
+/**
  * Formats a PostgreSQL value with proper literal quoting and escaping
  */
 export function formatPostgresInsertValue(
   rawVal: any,
   type: PostgresInsertType,
-  includeCast = false
+  includeCast = false,
+  colConstraints?: { maxLength?: number; precision?: number; scale?: number }
 ): string {
   if (rawVal === null || rawVal === undefined) {
     return 'NULL';
@@ -313,13 +379,30 @@ export function formatPostgresInsertValue(
     case 'serial':
     case 'bigserial': {
       const cleaned = strVal.replace(/[^0-9-]/g, '');
-      const num = parseInt(cleaned, 10);
-      if (isNaN(num)) return '0';
+      let num = parseInt(cleaned, 10);
+      if (isNaN(num)) num = 0;
+      if (type === 'smallint') {
+        if (num > 32767) num = 32767;
+        if (num < -32768) num = -32768;
+      }
       return includeCast ? `${num}::${type}` : String(num);
     }
 
     case 'numeric':
-    case 'decimal':
+    case 'decimal': {
+      const { formatted } = clampNumericToPrecisionScale(
+        strVal,
+        colConstraints?.precision,
+        colConstraints?.scale ?? 0
+      );
+      const castType = colConstraints?.precision
+        ? (colConstraints.scale !== undefined && colConstraints.scale > 0
+            ? `${type}(${colConstraints.precision}, ${colConstraints.scale})`
+            : `${type}(${colConstraints.precision})`)
+        : type;
+      return includeCast ? `${formatted}::${castType}` : formatted;
+    }
+
     case 'real':
     case 'double precision': {
       const cleaned = strVal.replace(/[^0-9.-]/g, '');
@@ -362,8 +445,15 @@ export function formatPostgresInsertValue(
     case 'character varying':
     case 'text':
     default: {
-      const escaped = strVal.replace(/'/g, "''");
-      return includeCast ? `'${escaped}'::${type}` : `'${escaped}'`;
+      let constrained = strVal;
+      if (colConstraints?.maxLength !== undefined && colConstraints.maxLength > 0) {
+        constrained = clampStringToMaxLength(constrained, colConstraints.maxLength);
+      }
+      const escaped = constrained.replace(/'/g, "''");
+      const castType = colConstraints?.maxLength
+        ? `${type}(${colConstraints.maxLength})`
+        : type;
+      return includeCast ? `'${escaped}'::${castType}` : `'${escaped}'`;
     }
   }
 }
@@ -388,14 +478,30 @@ export function generateColumnValue(
 
   // 3. Fixed value mode
   if (col.valueMode === 'fixed') {
-    const val = col.fixedValue !== undefined ? col.fixedValue : '';
-    return { formatted: formatPostgresInsertValue(val, col.type), raw: val };
+    let val = col.fixedValue !== undefined ? col.fixedValue : '';
+    if ((col.type === 'character varying' || col.type === 'varchar' || col.type === 'character' || col.type === 'text') && col.maxLength) {
+      val = clampStringToMaxLength(String(val), col.maxLength);
+      return { formatted: formatPostgresInsertValue(val, col.type, false, col), raw: val };
+    }
+    if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+      const { formatted, num } = clampNumericToPrecisionScale(val, col.precision, col.scale ?? 0, rowIndex);
+      return { formatted: formatPostgresInsertValue(formatted, col.type, false, col), raw: num };
+    }
+    return { formatted: formatPostgresInsertValue(val, col.type, false, col), raw: val };
   }
 
   // 4. Value pool mode (cycles through list)
   if (col.valueMode === 'pool' && col.valuePool && col.valuePool.length > 0) {
-    const poolVal = col.valuePool[rowIndex % col.valuePool.length];
-    return { formatted: formatPostgresInsertValue(poolVal, col.type), raw: poolVal };
+    let poolVal = col.valuePool[rowIndex % col.valuePool.length];
+    if ((col.type === 'character varying' || col.type === 'varchar' || col.type === 'character' || col.type === 'text') && col.maxLength) {
+      poolVal = clampStringToMaxLength(String(poolVal), col.maxLength);
+      return { formatted: formatPostgresInsertValue(poolVal, col.type, false, col), raw: poolVal };
+    }
+    if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+      const { formatted, num } = clampNumericToPrecisionScale(poolVal, col.precision, col.scale ?? 0, rowIndex);
+      return { formatted: formatPostgresInsertValue(formatted, col.type, false, col), raw: num };
+    }
+    return { formatted: formatPostgresInsertValue(poolVal, col.type, false, col), raw: poolVal };
   }
 
   // 5. Generator mode
@@ -406,27 +512,57 @@ export function generateColumnValue(
     case 'sequential_int': {
       const start = opts.start !== undefined ? opts.start : 1;
       const step = opts.step !== undefined ? opts.step : 1;
-      const num = start + rowIndex * step;
+      let num = start + rowIndex * step;
+      if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+        const { formatted, num: constrainedNum } = clampNumericToPrecisionScale(num, col.precision, col.scale ?? 0, rowIndex);
+        return { formatted: formatPostgresInsertValue(formatted, col.type, false, col), raw: constrainedNum };
+      }
       return { formatted: String(num), raw: num };
     }
 
     case 'random_int': {
-      const min = opts.min !== undefined ? opts.min : 1;
-      const max = opts.max !== undefined ? opts.max : 1000;
+      let min = opts.min !== undefined ? opts.min : 1;
+      let max = opts.max !== undefined ? opts.max : 1000;
+      if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+        const s = col.scale ?? 0;
+        const intDigits = Math.max(0, col.precision - s);
+        const maxAllowed = intDigits > 0 ? Math.pow(10, intDigits) - 1 : 0;
+        max = Math.min(max, maxAllowed);
+        if (min > max) min = 1;
+      }
       // Deterministic pseudo-random seed per row index to keep output stable
       const seed = Math.sin(rowIndex + 1) * 10000;
       const rand = Math.floor((seed - Math.floor(seed)) * (max - min + 1)) + min;
+      if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+        const { formatted, num } = clampNumericToPrecisionScale(rand, col.precision, col.scale ?? 0, rowIndex);
+        return { formatted: formatPostgresInsertValue(formatted, col.type, false, col), raw: num };
+      }
       return { formatted: String(rand), raw: rand };
     }
 
     case 'random_decimal': {
-      const min = opts.min !== undefined ? opts.min : 10;
-      const max = opts.max !== undefined ? opts.max : 10000;
-      const dec = opts.decimals !== undefined ? opts.decimals : 2;
+      let dec = opts.decimals !== undefined ? opts.decimals : (col.scale !== undefined ? col.scale : 2);
+      let min = opts.min !== undefined ? opts.min : 10;
+      let max = opts.max !== undefined ? opts.max : 10000;
+
+      if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+        const s = col.scale !== undefined ? col.scale : 0;
+        dec = s;
+        const intDigits = Math.max(0, col.precision - s);
+        const maxAllowed = intDigits > 0
+          ? Math.pow(10, intDigits) - (s > 0 ? Math.pow(10, -s) : 1)
+          : 1 - Math.pow(10, -s);
+        max = Math.min(max, maxAllowed);
+        if (min >= max) {
+          min = intDigits === 1 && s === 0 ? 1 : Math.max(1, Math.min(10, max / 2));
+        }
+      }
+
       const seed = Math.cos(rowIndex + 1) * 10000;
       const rand = (seed - Math.floor(seed)) * (max - min) + min;
       const str = rand.toFixed(dec);
-      return { formatted: str, raw: parseFloat(str) };
+      const parsed = parseFloat(str);
+      return { formatted: str, raw: parsed };
     }
 
     case 'uuid': {
@@ -435,7 +571,8 @@ export function generateColumnValue(
       }
       // Generate deterministic UUID v4 string
       const hex = (rowIndex * 99991 + 123456789).toString(16).padStart(12, '0');
-      const uuidStr = `a0000000-0000-4000-8000-${hex.slice(0, 12)}`;
+      let uuidStr = `a0000000-0000-4000-8000-${hex.slice(0, 12)}`;
+      if (col.maxLength) uuidStr = clampStringToMaxLength(uuidStr, col.maxLength);
       return { formatted: `'${uuidStr}'`, raw: uuidStr };
     }
 
@@ -446,14 +583,16 @@ export function generateColumnValue(
       // Formatted ISO timestamp shifted by rowIndex hours
       const baseDate = new Date('2026-09-30T10:00:00Z');
       baseDate.setHours(baseDate.getHours() + rowIndex);
-      const iso = baseDate.toISOString().replace('T', ' ').replace('Z', '+00');
+      let iso = baseDate.toISOString().replace('T', ' ').replace('Z', '+00');
+      if (col.maxLength) iso = clampStringToMaxLength(iso, col.maxLength);
       return { formatted: `'${iso}'`, raw: iso };
     }
 
     case 'random_date': {
       const baseDate = new Date('2026-01-01');
       baseDate.setDate(baseDate.getDate() + (rowIndex * 17) % 365);
-      const dateStr = baseDate.toISOString().slice(0, 10);
+      let dateStr = baseDate.toISOString().slice(0, 10);
+      if (col.maxLength) dateStr = clampStringToMaxLength(dateStr, col.maxLength);
       return { formatted: `'${dateStr}'`, raw: dateStr };
     }
 
@@ -465,43 +604,50 @@ export function generateColumnValue(
     case 'name': {
       const fn = SAMPLE_FIRST_NAMES[rowIndex % SAMPLE_FIRST_NAMES.length];
       const ln = SAMPLE_LAST_NAMES[(rowIndex * 3) % SAMPLE_LAST_NAMES.length];
-      const fullName = `${fn} ${ln}`;
-      return { formatted: `'${fullName}'`, raw: fullName };
+      let fullName = `${fn} ${ln}`;
+      if (col.maxLength) fullName = clampStringToMaxLength(fullName, col.maxLength);
+      return { formatted: `'${fullName.replace(/'/g, "''")}'`, raw: fullName };
     }
 
     case 'company': {
       const comp = SAMPLE_COMPANIES[rowIndex % SAMPLE_COMPANIES.length];
-      const suffixed = totalRows > SAMPLE_COMPANIES.length ? `${comp} #${rowIndex + 1}` : comp;
-      return { formatted: `'${suffixed}'`, raw: suffixed };
+      let suffixed = totalRows > SAMPLE_COMPANIES.length ? `${comp} #${rowIndex + 1}` : comp;
+      if (col.maxLength) suffixed = clampStringToMaxLength(suffixed, col.maxLength);
+      return { formatted: `'${suffixed.replace(/'/g, "''")}'`, raw: suffixed };
     }
 
     case 'email': {
       const fn = SAMPLE_FIRST_NAMES[rowIndex % SAMPLE_FIRST_NAMES.length].toLowerCase();
       const ln = SAMPLE_LAST_NAMES[(rowIndex * 3) % SAMPLE_LAST_NAMES.length].toLowerCase();
       const numSuffix = Math.floor(rowIndex / SAMPLE_FIRST_NAMES.length) > 0 ? `${Math.floor(rowIndex / SAMPLE_FIRST_NAMES.length) + 1}` : '';
-      const email = `${fn}.${ln}${numSuffix}@example.com`;
-      return { formatted: `'${email}'`, raw: email };
+      let email = `${fn}.${ln}${numSuffix}@example.com`;
+      if (col.maxLength) email = clampStringToMaxLength(email, col.maxLength);
+      return { formatted: `'${email.replace(/'/g, "''")}'`, raw: email };
     }
 
     case 'username': {
       const fn = SAMPLE_FIRST_NAMES[rowIndex % SAMPLE_FIRST_NAMES.length].toLowerCase();
-      const u = `${fn}_${String(rowIndex + 1).padStart(3, '0')}`;
-      return { formatted: `'${u}'`, raw: u };
+      let u = `${fn}_${String(rowIndex + 1).padStart(3, '0')}`;
+      if (col.maxLength) u = clampStringToMaxLength(u, col.maxLength);
+      return { formatted: `'${u.replace(/'/g, "''")}'`, raw: u };
     }
 
     case 'phone': {
-      const phone = `+1-555-${String(100 + rowIndex).padStart(3, '0')}-${String(1000 + rowIndex * 7).slice(0, 4)}`;
-      return { formatted: `'${phone}'`, raw: phone };
+      let phone = `+1-555-${String(100 + rowIndex).padStart(3, '0')}-${String(1000 + rowIndex * 7).slice(0, 4)}`;
+      if (col.maxLength) phone = clampStringToMaxLength(phone, col.maxLength);
+      return { formatted: `'${phone.replace(/'/g, "''")}'`, raw: phone };
     }
 
     case 'city': {
-      const city = SAMPLE_CITIES[rowIndex % SAMPLE_CITIES.length];
-      return { formatted: `'${city}'`, raw: city };
+      let city = SAMPLE_CITIES[rowIndex % SAMPLE_CITIES.length];
+      if (col.maxLength) city = clampStringToMaxLength(city, col.maxLength);
+      return { formatted: `'${city.replace(/'/g, "''")}'`, raw: city };
     }
 
     case 'country_code': {
-      const code = SAMPLE_COUNTRIES[rowIndex % SAMPLE_COUNTRIES.length];
-      return { formatted: `'${code}'`, raw: code };
+      let code = SAMPLE_COUNTRIES[rowIndex % SAMPLE_COUNTRIES.length];
+      if (col.maxLength) code = clampStringToMaxLength(code, col.maxLength);
+      return { formatted: `'${code.replace(/'/g, "''")}'`, raw: code };
     }
 
     case 'json_object': {
@@ -516,13 +662,15 @@ export function generateColumnValue(
     }
 
     case 'lorem': {
-      const lorem = `Sample record entry #${rowIndex + 1} generated for PostgreSQL integration testing.`;
-      return { formatted: `'${lorem}'`, raw: lorem };
+      let lorem = `Sample record entry #${rowIndex + 1} generated for PostgreSQL integration testing.`;
+      if (col.maxLength) lorem = clampStringToMaxLength(lorem, col.maxLength);
+      return { formatted: `'${lorem.replace(/'/g, "''")}'`, raw: lorem };
     }
 
     default: {
-      const fallback = `Record_${rowIndex + 1}`;
-      return { formatted: `'${fallback}'`, raw: fallback };
+      let fallback = `Record_${rowIndex + 1}`;
+      if (col.maxLength) fallback = clampStringToMaxLength(fallback, col.maxLength);
+      return { formatted: `'${fallback.replace(/'/g, "''")}'`, raw: fallback };
     }
   }
 }
@@ -761,7 +909,15 @@ export function generateCreateTableDdl(options: InsertQueryOptions): string {
   const pkCols: string[] = [];
 
   for (const col of options.columns) {
-    let def = `  "${col.name}" ${col.type.toUpperCase()}`;
+    let typeDef = col.type.toUpperCase();
+    if ((col.type === 'character varying' || col.type === 'varchar' || col.type === 'character') && col.maxLength) {
+      typeDef = `${col.type.toUpperCase()}(${col.maxLength})`;
+    } else if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+      typeDef = col.scale !== undefined && col.scale > 0
+        ? `${col.type.toUpperCase()}(${col.precision}, ${col.scale})`
+        : `${col.type.toUpperCase()}(${col.precision})`;
+    }
+    let def = `  "${col.name}" ${typeDef}`;
     if (col.isPrimaryKey) {
       pkCols.push(`"${col.name}"`);
     }
@@ -873,6 +1029,27 @@ export function parsePostgresSchema(ddl: string): {
       const isNullable = !isNotNull;
       const hasExplicitDefault = /\bDEFAULT\b/i.test(remainder);
 
+      // Extract size constraints: maxLength, precision, scale
+      let extractedMaxLength: number | undefined;
+      let extractedPrecision: number | undefined;
+      let extractedScale: number | undefined;
+
+      // Match string length constraints e.g. character varying (25), varchar(50), character(10), char(5)
+      const strLenMatch = remainder.match(/(?:character\s+varying|varchar|character|char)\s*\(\s*(\d+)\s*\)/i);
+      if (strLenMatch) {
+        extractedMaxLength = parseInt(strLenMatch[1], 10);
+      } else if (/\b(?:character|char)\b(?!\s*varying)/i.test(remainder) && !/\(\s*\d+\s*\)/.test(remainder)) {
+        // SQL standard: CHAR without length means CHAR(1)
+        extractedMaxLength = 1;
+      }
+
+      // Match numeric precision and optional scale e.g. numeric(2), numeric ( 10 , 2 ), decimal(8, 3)
+      const numPrecMatch = remainder.match(/(?:numeric|decimal)\s*\(\s*(\d+)(?:\s*,\s*(\d+))?\s*\)/i);
+      if (numPrecMatch) {
+        extractedPrecision = parseInt(numPrecMatch[1], 10);
+        extractedScale = numPrecMatch[2] !== undefined ? parseInt(numPrecMatch[2], 10) : 0;
+      }
+
       // Strip known constraint clauses to isolate data type
       const rawType = remainder
         .replace(/\bPRIMARY\s+KEY\b/gi, '')
@@ -938,16 +1115,32 @@ export function parsePostgresSchema(ddl: string): {
         genType = 'random_date';
       } else if (mappedType === 'numeric' || mappedType === 'double precision') {
         genType = 'random_decimal';
-        genOpts = { min: 100, max: 10000, decimals: 2 };
+        if (extractedPrecision !== undefined) {
+          const s = extractedScale ?? 0;
+          const intDigits = Math.max(0, extractedPrecision - s);
+          if (intDigits === 0) {
+            const maxVal = 1 - Math.pow(10, -s);
+            genOpts = { min: Math.pow(10, -s), max: maxVal, decimals: s };
+          } else {
+            const maxAllowed = Math.pow(10, intDigits) - (s > 0 ? Math.pow(10, -s) : 1);
+            const maxVal = Math.min(10000, maxAllowed);
+            const minVal = intDigits === 1 && s === 0 ? 1 : Math.max(1, Math.min(10, maxVal / 2));
+            genOpts = { min: minVal, max: maxVal, decimals: s };
+          }
+        } else {
+          genOpts = { min: 100, max: 10000, decimals: 2 };
+        }
       } else if (mappedType === 'integer' || mappedType === 'bigint' || mappedType === 'smallint') {
         genType = 'random_int';
         genOpts = { min: 1, max: 1000 };
       } else if (mappedType === 'jsonb' || mappedType === 'json') {
         genType = 'json_object';
       } else {
-        // String types: infer from column name
+        // String types: infer from column name & size constraint
         const lowerName = colName.toLowerCase();
-        if (lowerName.includes('email')) genType = 'email';
+        if (extractedMaxLength !== undefined && extractedMaxLength <= 3) {
+          genType = 'country_code';
+        } else if (lowerName.includes('email')) genType = 'email';
         else if (lowerName.includes('name') && !lowerName.includes('company')) genType = 'name';
         else if (lowerName.includes('company') || lowerName.includes('org')) genType = 'company';
         else if (lowerName.includes('user') || lowerName.includes('login')) genType = 'username';
@@ -961,6 +1154,9 @@ export function parsePostgresSchema(ddl: string): {
         id: `col_${colIndex++}`,
         name: colName,
         type: mappedType,
+        maxLength: extractedMaxLength,
+        precision: extractedPrecision,
+        scale: extractedScale,
         nullable: isNullable,
         hasDefault,
         isPrimaryKey: isPkColumn,
@@ -1033,6 +1229,9 @@ export function validateAndParseDbInsertConfig(jsonString: string): {
       id: c.id || `col_${idx + 1}`,
       name: String(c.name || `column_${idx + 1}`),
       type: c.type || 'text',
+      maxLength: typeof c.maxLength === 'number' ? c.maxLength : undefined,
+      precision: typeof c.precision === 'number' ? c.precision : undefined,
+      scale: typeof c.scale === 'number' ? c.scale : undefined,
       nullable: Boolean(c.nullable),
       hasDefault: Boolean(c.hasDefault),
       isPrimaryKey: Boolean(c.isPrimaryKey),
@@ -1395,6 +1594,121 @@ export const DB_INSERT_PRESETS: {
       conflictTargetColumns: [],
       conflictUpdateColumns: [],
       returningClause: '',
+      wrapInTransaction: false,
+      includeTypeCasts: false,
+      includeComments: true,
+    },
+  },
+  {
+    id: 'inventory-items',
+    name: 'Product Inventory (VARCHAR(25), NUMERIC(2), NUMERIC(8,2))',
+    description: 'Catalog items with size-constrained SKU varchar(25), rating numeric(2), price numeric(8,2), and short_desc char(25)',
+    badge: 'Size Constraints Test',
+    options: {
+      tableName: 'product_inventory',
+      schema: 'public',
+      columns: [
+        {
+          id: 'inv_1',
+          name: 'sku',
+          type: 'character varying',
+          maxLength: 25,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: true,
+          isUnique: true,
+          excludeFromInsert: false,
+          valueMode: 'generator',
+          fixedValue: '',
+          valuePool: [],
+          generatorType: 'company',
+        },
+        {
+          id: 'inv_2',
+          name: 'category_code',
+          type: 'varchar',
+          maxLength: 10,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'pool',
+          fixedValue: 'ELECTRONIC',
+          valuePool: ['HARDWARE', 'SOFTWARE', 'OFFICE', 'MOBILE', 'APPAREL'],
+          generatorType: 'name',
+        },
+        {
+          id: 'inv_3',
+          name: 'quality_rating',
+          type: 'numeric',
+          precision: 2,
+          scale: 0,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator',
+          fixedValue: '9',
+          valuePool: ['5', '8', '9', '10', '12'],
+          generatorType: 'random_decimal',
+          generatorOptions: { min: 1, max: 99, decimals: 0 },
+        },
+        {
+          id: 'inv_4',
+          name: 'unit_price',
+          type: 'numeric',
+          precision: 8,
+          scale: 2,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator',
+          fixedValue: '49.99',
+          valuePool: ['19.99', '49.99', '129.50', '850.00'],
+          generatorType: 'random_decimal',
+          generatorOptions: { min: 10, max: 2500, decimals: 2 },
+        },
+        {
+          id: 'inv_5',
+          name: 'short_desc',
+          type: 'character',
+          maxLength: 25,
+          nullable: true,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator',
+          fixedValue: 'Standard boxed inventory',
+          valuePool: [],
+          generatorType: 'lorem',
+        },
+        {
+          id: 'inv_6',
+          name: 'in_stock',
+          type: 'boolean',
+          nullable: false,
+          hasDefault: true,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'fixed',
+          fixedValue: 'true',
+          valuePool: ['true', 'false'],
+          generatorType: 'random_boolean',
+        },
+      ],
+      rowCount: 5,
+      insertStrategy: 'bulk_single_statement',
+      batchSize: 100,
+      conflictStrategy: 'none',
+      conflictTargetColumns: [],
+      conflictUpdateColumns: [],
+      returningClause: '*',
       wrapInTransaction: false,
       includeTypeCasts: false,
       includeComments: true,

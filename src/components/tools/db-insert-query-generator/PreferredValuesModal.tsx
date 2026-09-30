@@ -7,6 +7,9 @@ interface PreferredValuesModalProps {
   onClose: () => void;
   columnName: string;
   columnType: string;
+  maxLength?: number;
+  precision?: number;
+  scale?: number;
   initialValues: string[];
   onSave: (values: string[]) => void;
 }
@@ -59,6 +62,9 @@ export const PreferredValuesModal: React.FC<PreferredValuesModalProps> = ({
   onClose,
   columnName,
   columnType,
+  maxLength,
+  precision,
+  scale,
   initialValues,
   onSave,
 }) => {
@@ -98,6 +104,12 @@ export const PreferredValuesModal: React.FC<PreferredValuesModalProps> = ({
     onClose();
   };
 
+  const typeLabel = maxLength
+    ? `${columnType}(${maxLength})`
+    : precision
+    ? `${columnType}(${precision}${scale !== undefined && scale > 0 ? `, ${scale}` : ''})`
+    : columnType;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-950/60 backdrop-blur-sm animate-in fade-in duration-150"
@@ -117,7 +129,7 @@ export const PreferredValuesModal: React.FC<PreferredValuesModalProps> = ({
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-bold tracking-tight">Preferred Values Pool</h2>
                 <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-semibold border border-indigo-200 dark:border-indigo-800/60">
-                  {columnName} ({columnType})
+                  {columnName} : {typeLabel}
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -135,6 +147,17 @@ export const PreferredValuesModal: React.FC<PreferredValuesModalProps> = ({
 
         {/* Content Body */}
         <div className="p-5 overflow-y-auto space-y-4 text-xs">
+          {/* Size Constraint Notice */}
+          {maxLength !== undefined && maxLength > 0 && (
+            <div className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 text-[11px] text-amber-800 dark:text-amber-300">
+              <strong>Size Constraint Active:</strong> This column is restricted to a maximum length of <strong>{maxLength}</strong> characters. Any preferred value exceeding {maxLength} characters will be automatically truncated upon SQL generation to satisfy the database constraint.
+            </div>
+          )}
+          {precision !== undefined && precision > 0 && (
+            <div className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60 text-[11px] text-amber-800 dark:text-amber-300">
+              <strong>Numeric Constraint Active:</strong> NUMERIC({precision}{scale !== undefined && scale > 0 ? `, ${scale}` : ''}) bounds maximum absolute value to <strong>{Math.pow(10, Math.max(0, precision - (scale ?? 0))) - 1}</strong> with <strong>{scale ?? 0}</strong> decimal places. Values will be automatically constrained.
+            </div>
+          )}
           {/* Preset Buttons */}
           <div className="space-y-1.5">
             <label className="block text-[11px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider">

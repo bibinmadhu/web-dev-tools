@@ -3894,6 +3894,137 @@ CREATE TABLE IF NOT EXISTS "public"."ecommerce_customers" (
     assertTrue(ddl.includes('PRIMARY KEY ("id")'), 'Contains PRIMARY KEY table constraint');
   });
 
+  test('Database Insert Generator', 'Size Constraints (character varying (25), numeric(2), char(5))', () => {
+    // 1. DDL Parsing of size constraints
+    const ddl = `
+CREATE TABLE "size_test" (
+  code character varying (25) PRIMARY KEY,
+  rating numeric(2) NOT NULL,
+  cost numeric(10, 2) NOT NULL,
+  tag character(5),
+  description varchar(20)
+);`;
+
+    const parsed = parsePostgresSchema(ddl);
+    assertTrue(parsed.success, 'Parsed DDL with size constraints');
+    assertEqual(parsed.columns.length, 5, '5 columns parsed');
+
+    const codeCol = parsed.columns.find((c) => c.name === 'code');
+    assertEqual(codeCol?.type, 'character varying', 'code type is character varying');
+    assertEqual(codeCol?.maxLength, 25, 'character varying (25) size constraint extracted as 25');
+
+    const ratingCol = parsed.columns.find((c) => c.name === 'rating');
+    assertEqual(ratingCol?.type, 'numeric', 'rating type is numeric');
+    assertEqual(ratingCol?.precision, 2, 'numeric(2) precision extracted as 2');
+    assertEqual(ratingCol?.scale, 0, 'numeric(2) scale defaults to 0');
+
+    const costCol = parsed.columns.find((c) => c.name === 'cost');
+    assertEqual(costCol?.precision, 10, 'numeric(10, 2) precision extracted as 10');
+    assertEqual(costCol?.scale, 2, 'numeric(10, 2) scale extracted as 2');
+
+    const tagCol = parsed.columns.find((c) => c.name === 'tag');
+    assertEqual(tagCol?.type, 'character', 'tag type is character');
+    assertEqual(tagCol?.maxLength, 5, 'character(5) length extracted as 5');
+
+    const descCol = parsed.columns.find((c) => c.name === 'description');
+    assertEqual(descCol?.maxLength, 20, 'varchar(20) length extracted as 20');
+
+    // 2. Query Generation with Size Constraints
+    const queryOpts = {
+      tableName: 'size_test',
+      schema: 'public',
+      columns: parsed.columns,
+      rowCount: 10,
+      insertStrategy: 'bulk_single_statement' as const,
+      batchSize: 100,
+      conflictStrategy: 'none' as const,
+      conflictTargetColumns: [],
+      conflictUpdateColumns: [],
+      returningClause: '*',
+      wrapInTransaction: false,
+      includeTypeCasts: false,
+      includeComments: false,
+    };
+
+    const result = generatePostgresInsertQuery(queryOpts);
+    assertTrue(Boolean(result.previewRows && result.previewRows.length === 10), '10 preview rows generated');
+
+    // Verify all rows strictly respect character varying (25) and numeric(2)
+    for (const row of result.previewRows!) {
+      const codeVal = String(row['code']);
+      assertTrue(codeVal.length <= 25, `code "${codeVal}" length ${codeVal.length} does not exceed 25`);
+
+      const ratingVal = Number(row['rating']);
+      assertTrue(!isNaN(ratingVal), `rating "${ratingVal}" is a valid number`);
+      assertTrue(ratingVal <= 99 && ratingVal >= -99, `rating ${ratingVal} fits in numeric(2) <= 99`);
+      assertEqual(Math.floor(ratingVal), ratingVal, `rating ${ratingVal} has 0 decimal places`);
+
+      const descVal = String(row['description']);
+      assertTrue(descVal.length <= 20, `description "${descVal}" length ${descVal.length} does not exceed 20`);
+    }
+
+    // 3. Clamping of oversized fixed and pool values
+    const clampedColOpts = {
+      tableName: 'size_clamp_test',
+      schema: 'public',
+      columns: [
+        {
+          id: 'c1',
+          name: 'short_code',
+          type: 'character varying' as const,
+          maxLength: 10,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'fixed' as const,
+          fixedValue: 'This string is way longer than 10 characters',
+          valuePool: [],
+          generatorType: 'lorem' as const,
+        },
+        {
+          id: 'c2',
+          name: 'small_num',
+          type: 'numeric' as const,
+          precision: 2,
+          scale: 0,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'fixed' as const,
+          fixedValue: '2500000',
+          valuePool: [],
+          generatorType: 'random_decimal' as const,
+        },
+      ],
+      rowCount: 2,
+      insertStrategy: 'bulk_single_statement' as const,
+      batchSize: 100,
+      conflictStrategy: 'none' as const,
+      conflictTargetColumns: [],
+      conflictUpdateColumns: [],
+      returningClause: '',
+      wrapInTransaction: false,
+      includeTypeCasts: false,
+      includeComments: false,
+    };
+
+    const clampedResult = generatePostgresInsertQuery(clampedColOpts);
+    for (const row of clampedResult.previewRows!) {
+      assertEqual(String(row['short_code']).length, 10, 'Oversized fixed string clamped to max 10 chars');
+      assertEqual(row['small_num'], 99, 'Oversized numeric value clamped to max 99 for numeric(2)');
+    }
+
+    // 4. CREATE TABLE DDL preserves size constraints
+    const ddlOutput = generateCreateTableDdl(queryOpts);
+    assertTrue(ddlOutput.includes('"code" CHARACTER VARYING(25)'), 'DDL output includes CHARACTER VARYING(25)');
+    assertTrue(ddlOutput.includes('"rating" NUMERIC(2)'), 'DDL output includes NUMERIC(2)');
+    assertTrue(ddlOutput.includes('"cost" NUMERIC(10, 2)'), 'DDL output includes NUMERIC(10, 2)');
+  });
+
   const durationMs = Math.round((performance.now() - startTime) * 100) / 100;
   const passed = results.filter((r) => r.status === 'passed').length;
   const failed = results.filter((r) => r.status === 'failed').length;
