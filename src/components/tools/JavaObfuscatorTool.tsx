@@ -53,6 +53,7 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
     variables: {},
     methods: {},
     packages: {},
+    paths: {},
     reverseMapping: {},
   });
 
@@ -65,14 +66,17 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
     customClassPrefix: 'Cls',
     customVarPrefix: 'v',
     customMethodPrefix: 'mth',
+    customPathPrefix: 'pth',
     obfuscateClasses: true,
     obfuscateVariables: true,
     obfuscateMethods: true,
+    obfuscateExternalMethods: true,
+    obfuscateRestPaths: true,
     obfuscatePackages: true,
     encryptStrings: false,
     stripComments: true,
     preserveMain: true,
-    preserveGettersSetters: true,
+    preserveGettersSetters: false,
     preserveAnnotated: true,
     excludedPackages: [...DEFAULT_EXCLUDED_PACKAGES],
     customExclusions: ['toString', 'equals', 'hashCode'],
@@ -89,6 +93,7 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
     variablesRenamed: 0,
     methodsRenamed: 0,
     packagesRenamed: 0,
+    pathsRenamed: 0,
   });
 
   // Package exclusion input
@@ -234,6 +239,7 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
     Object.entries(mapping.methods || {}).forEach(([orig, obf]) => all.push({ category: 'Method', original: orig, obfuscated: String(obf) }));
     Object.entries(mapping.variables || {}).forEach(([orig, obf]) => all.push({ category: 'Variable', original: orig, obfuscated: String(obf) }));
     Object.entries(mapping.packages || {}).forEach(([orig, obf]) => all.push({ category: 'Package', original: orig, obfuscated: String(obf) }));
+    Object.entries(mapping.paths || {}).forEach(([orig, obf]) => all.push({ category: 'REST Path', original: orig, obfuscated: String(obf) }));
 
     if (!mappingSearchQuery.trim()) return all;
     const q = mappingSearchQuery.toLowerCase();
@@ -410,13 +416,13 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
       {mode === 'obfuscate' && (
         <div className="space-y-4">
           {/* Stats Bar */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 font-mono text-xs">
             <div className="bg-[#0F172A] border border-slate-800 p-3 rounded-xl flex items-center justify-between">
               <span className="text-slate-400">CLASSES RENAMED</span>
               <span className="font-bold text-indigo-400">{stats.classesRenamed}</span>
             </div>
             <div className="bg-[#0F172A] border border-slate-800 p-3 rounded-xl flex items-center justify-between">
-              <span className="text-slate-400">METHODS RENAMED</span>
+              <span className="text-slate-400">METHODS (INCL. EXT)</span>
               <span className="font-bold text-indigo-400">{stats.methodsRenamed}</span>
             </div>
             <div className="bg-[#0F172A] border border-slate-800 p-3 rounded-xl flex items-center justify-between">
@@ -426,6 +432,10 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
             <div className="bg-[#0F172A] border border-slate-800 p-3 rounded-xl flex items-center justify-between">
               <span className="text-slate-400">PACKAGES RENAMED</span>
               <span className="font-bold text-indigo-400">{stats.packagesRenamed}</span>
+            </div>
+            <div className="bg-[#0F172A] border border-slate-800 p-3 rounded-xl flex items-center justify-between">
+              <span className="text-slate-400">REST PATHS RENAMED</span>
+              <span className="font-bold text-sky-400">{stats.pathsRenamed}</span>
             </div>
           </div>
 
@@ -610,6 +620,8 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
                                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                                 : item.category === 'Variable'
                                 ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                : item.category === 'REST Path'
+                                ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
                                 : 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
                             }`}
                           >
@@ -653,7 +665,7 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
                 </select>
 
                 {options.namingStyle === 'customPrefix' && (
-                  <div className="grid grid-cols-3 gap-2 pt-2">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2">
                     <div>
                       <span className="text-[10px] text-slate-400 block mb-1">Class Prefix</span>
                       <input
@@ -678,6 +690,15 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
                         type="text"
                         value={options.customVarPrefix}
                         onChange={(e) => setOptions({ ...options, customVarPrefix: e.target.value })}
+                        className="w-full bg-[#0B0F1A] border border-slate-800 rounded p-1.5 text-slate-200 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 block mb-1">Path Prefix</span>
+                      <input
+                        type="text"
+                        value={options.customPathPrefix || 'pth'}
+                        onChange={(e) => setOptions({ ...options, customPathPrefix: e.target.value })}
                         className="w-full bg-[#0B0F1A] border border-slate-800 rounded p-1.5 text-slate-200 font-mono"
                       />
                     </div>
@@ -712,6 +733,26 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
                   <label className="flex items-center gap-2 cursor-pointer bg-slate-900/60 p-2.5 rounded-lg border border-slate-800/80">
                     <input
                       type="checkbox"
+                      checked={options.obfuscateExternalMethods !== false}
+                      onChange={(e) => setOptions({ ...options, obfuscateExternalMethods: e.target.checked })}
+                      className="accent-indigo-500 rounded"
+                    />
+                    <span className="text-slate-200 font-medium">External Methods</span>
+                  </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer bg-slate-900/60 p-2.5 rounded-lg border border-slate-800/80">
+                    <input
+                      type="checkbox"
+                      checked={options.obfuscateRestPaths !== false}
+                      onChange={(e) => setOptions({ ...options, obfuscateRestPaths: e.target.checked })}
+                      className="accent-indigo-500 rounded"
+                    />
+                    <span className="text-slate-200 font-medium">REST Controller Paths</span>
+                  </label>
+
+                  <label className="flex items-center gap-2 cursor-pointer bg-slate-900/60 p-2.5 rounded-lg border border-slate-800/80">
+                    <input
+                      type="checkbox"
                       checked={options.obfuscateVariables}
                       onChange={(e) => setOptions({ ...options, obfuscateVariables: e.target.checked })}
                       className="accent-indigo-500 rounded"
@@ -735,9 +776,25 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
 
           {/* Preservation & Code Transformation Rules */}
           <div className="bg-[#0F172A] border border-slate-800 rounded-xl p-5 space-y-4">
-            <h4 className="text-sm font-bold text-white flex items-center gap-2 border-b border-slate-800 pb-2">
-              <Shield className="w-4 h-4 text-emerald-400" /> Preservation & Safety Rules
-            </h4>
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+              <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                <Shield className="w-4 h-4 text-emerald-400" /> Preservation & Safety Rules
+              </h4>
+              <span className="text-[11px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">
+                Annotations Strictly Preserved
+              </span>
+            </div>
+
+            {/* Explanatory banner for annotations */}
+            <div className="p-3 rounded-lg bg-emerald-500/5 border border-emerald-500/20 text-xs text-slate-300 flex items-start gap-2.5">
+              <Check className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
+              <div>
+                <span className="font-semibold text-emerald-300">Framework & Custom Annotation Immunity:</span>
+                <p className="text-slate-400 text-[11px] mt-0.5 leading-relaxed">
+                  All Spring, Jakarta, JPA, Jackson, and custom annotations (e.g. <code className="text-slate-200 font-mono">@RestController</code>, <code className="text-slate-200 font-mono">@RequestMapping</code>, <code className="text-slate-200 font-mono">@Autowired</code>, <code className="text-slate-200 font-mono">@Table</code>, <code className="text-slate-200 font-mono">@interface</code>) and their parameter attribute names are never obfuscated. REST endpoint paths inside annotations are safely obfuscated.
+                </p>
+              </div>
+            </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
               <label className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-900/60 border border-slate-800 cursor-pointer">

@@ -71,6 +71,7 @@ export interface GeneratorOptions {
   suffix?: string;
   decimals?: number;
   isSqlFunction?: boolean;
+  sampleTextTemplate?: string;
 }
 
 export interface InsertColumnConfig {
@@ -90,6 +91,8 @@ export interface InsertColumnConfig {
   valuePool: string[];
   generatorType: GeneratorType;
   generatorOptions?: GeneratorOptions;
+  sampleTextTemplate?: string;
+  linkedProjectRule?: string;
 }
 
 export type ConflictStrategy = 'none' | 'do_nothing' | 'do_update';
@@ -114,6 +117,8 @@ export interface InsertQueryOptions {
   wrapInTransaction: boolean;
   includeTypeCasts: boolean;
   includeComments: boolean;
+  generalDescriptiveTextTemplate?: string;
+  customGridRows?: Record<string, any>[];
 }
 
 export interface GeneratedInsertResult {
@@ -271,6 +276,7 @@ export const DEFAULT_INSERT_OPTIONS: InsertQueryOptions = {
   wrapInTransaction: false,
   includeTypeCasts: false,
   includeComments: true,
+  generalDescriptiveTextTemplate: '',
 };
 
 // Seeded mock data dictionaries for realistic mock generation
@@ -464,7 +470,8 @@ export function formatPostgresInsertValue(
 export function generateColumnValue(
   col: InsertColumnConfig,
   rowIndex: number,
-  totalRows: number
+  totalRows: number,
+  context?: { generalDescriptiveTextTemplate?: string; tableName?: string }
 ): { formatted: string; raw: any } {
   // 1. Explicit DEFAULT mode
   if (col.valueMode === 'default') {
@@ -662,7 +669,29 @@ export function generateColumnValue(
     }
 
     case 'lorem': {
-      let lorem = `Sample record entry #${rowIndex + 1} generated for PostgreSQL integration testing.`;
+      // Priority 1: Value-level (column-level) configuration override
+      const colOverride = col.sampleTextTemplate || col.generatorOptions?.sampleTextTemplate;
+      // Priority 2: General / global descriptive text template rule
+      const generalTemplate = context?.generalDescriptiveTextTemplate;
+      const template = (colOverride && colOverride.trim())
+        ? colOverride
+        : (generalTemplate && generalTemplate.trim() ? generalTemplate : undefined);
+
+      let lorem: string;
+      if (template && template.trim()) {
+        let templated = template;
+        if (templated.includes('{row}') || templated.includes('{index}') || templated.includes('${row}')) {
+          templated = templated
+            .replace(/\{row\}/g, String(rowIndex + 1))
+            .replace(/\{index\}/g, String(rowIndex + 1))
+            .replace(/\$\{row\}/g, String(rowIndex + 1));
+        }
+        templated = templated.replace(/\{col\}/g, col.name);
+        templated = templated.replace(/\{table\}/g, context?.tableName || 'table');
+        lorem = templated;
+      } else {
+        lorem = `Sample record entry #${rowIndex + 1} generated for PostgreSQL integration testing.`;
+      }
       if (col.maxLength) lorem = clampStringToMaxLength(lorem, col.maxLength);
       return { formatted: `'${lorem.replace(/'/g, "''")}'`, raw: lorem };
     }
@@ -753,7 +782,15 @@ export function generatePostgresInsertQuery(options: InsertQueryOptions): Genera
   );
   const returningClause = buildReturningClause(opts.returningClause);
 
-  const totalRows = Math.max(1, Math.min(opts.rowCount || 5, 2000));
+  const totalRows = Math.max(
+    1,
+    Math.min(
+      opts.customGridRows && opts.customGridRows.length > 0
+        ? Math.max(opts.rowCount || 5, opts.customGridRows.length)
+        : (opts.rowCount || 5),
+      2000
+    )
+  );
   const lines: string[] = [];
 
   if (opts.includeComments) {
@@ -774,10 +811,44 @@ export function generatePostgresInsertQuery(options: InsertQueryOptions): Genera
     lines.push('BEGIN;\n');
   }
 
-  // Pre-generate raw row values
+  // Pre-generate raw row values (incorporating custom user-edited grid rows if provided)
   const rowValues: { formatted: string; raw: any }[][] = [];
   for (let r = 0; r < totalRows; r++) {
-    const row = activeColumns.map((col) => generateColumnValue(col, r, totalRows));
+    const customRow = opts.customGridRows && opts.customGridRows[r] ? opts.customGridRows[r] : null;
+    const row = activeColumns.map((col) => {
+      if (customRow && customRow[col.name] !== undefined) {
+        const val = customRow[col.name];
+        if (val === null || val === undefined || (typeof val === 'string' && val.trim().toUpperCase() === 'NULL')) {
+          return { formatted: 'NULL', raw: null };
+        }
+        if (typeof val === 'string' && val.trim().toUpperCase() === 'DEFAULT') {
+          return { formatted: 'DEFAULT', raw: 'DEFAULT' };
+        }
+        // Apply numeric / string constraints if applicable
+        if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+          const { formatted, num } = clampNumericToPrecisionScale(val, col.precision, col.scale ?? 0, r);
+          return {
+            formatted: formatPostgresInsertValue(formatted, col.type, opts.includeTypeCasts, col),
+            raw: num,
+          };
+        }
+        if ((col.type === 'character varying' || col.type === 'varchar' || col.type === 'character' || col.type === 'text') && col.maxLength) {
+          const clamped = clampStringToMaxLength(String(val), col.maxLength);
+          return {
+            formatted: formatPostgresInsertValue(clamped, col.type, opts.includeTypeCasts, col),
+            raw: clamped,
+          };
+        }
+        return {
+          formatted: formatPostgresInsertValue(val, col.type, opts.includeTypeCasts, col),
+          raw: val,
+        };
+      }
+      return generateColumnValue(col, r, totalRows, {
+        generalDescriptiveTextTemplate: opts.generalDescriptiveTextTemplate,
+        tableName: opts.tableName,
+      });
+    });
     rowValues.push(row);
   }
 
@@ -1242,6 +1313,8 @@ export function validateAndParseDbInsertConfig(jsonString: string): {
       valuePool: Array.isArray(c.valuePool) ? c.valuePool.map(String) : [],
       generatorType: c.generatorType || 'sequential_int',
       generatorOptions: c.generatorOptions || {},
+      sampleTextTemplate: c.sampleTextTemplate || c.generatorOptions?.sampleTextTemplate || undefined,
+      linkedProjectRule: c.linkedProjectRule ? String(c.linkedProjectRule) : undefined,
     }));
 
     const sanitizedOptions: InsertQueryOptions = {
@@ -1258,6 +1331,8 @@ export function validateAndParseDbInsertConfig(jsonString: string): {
       wrapInTransaction: Boolean(config.wrapInTransaction),
       includeTypeCasts: Boolean(config.includeTypeCasts),
       includeComments: config.includeComments !== undefined ? Boolean(config.includeComments) : true,
+      generalDescriptiveTextTemplate: typeof config.generalDescriptiveTextTemplate === 'string' ? config.generalDescriptiveTextTemplate : '',
+      customGridRows: Array.isArray(config.customGridRows) ? config.customGridRows : undefined,
     };
 
     return { success: true, options: sanitizedOptions };

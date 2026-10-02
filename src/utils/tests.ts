@@ -101,7 +101,49 @@ import {
   generateCreateTableDdl,
   DEFAULT_INSERT_OPTIONS,
   DB_INSERT_PRESETS,
+  InsertColumnConfig,
 } from './dbInsertQueryGenerator';
+import {
+  parseJsonSafe,
+  tryFixCommonJsonErrors,
+  searchAndReplaceJson,
+  countMatches,
+  updateNodeAtPath,
+  deleteNodeAtPath,
+  insertChildAtPath,
+  duplicateNodeAtPath,
+  renameKeyAtPath,
+  sortJsonKeys,
+  flattenJson,
+  unflattenJson,
+  jsonToCsv,
+  csvToJson,
+  jsonToYaml,
+  yamlToJson,
+  generateTypeScriptTypes,
+  queryJsonWithExpression,
+  calculateJsonStats,
+  JSON_EDITOR_PRESETS,
+} from './jsonEditorUtils';
+import {
+  parseHeadersInput,
+  inferColumnRule,
+  generateCsvDataset,
+  extractHeadersAndInferRulesFromCsv,
+  csvToSqlInsert,
+  exportCsvPopulatorConfig,
+  validateAndParseCsvPopulatorConfig,
+  CSV_POPULATOR_PRESETS,
+} from './csvAutoPopulator';
+import {
+  DbProjectRule,
+  findMatchingProjectRule,
+  applyProjectRulesToColumns,
+  exportProjectRulesJson,
+  validateAndParseProjectRulesJson,
+  DEFAULT_PROJECT_RULES,
+  DEFAULT_COLUMN_MAPPINGS,
+} from './dbProjectRules';
 import { parseCurlCommand, tokenizeCurlCommand } from './curlParser';
 import { generatePythonCode, generateTypeScriptCode } from './curlToCode';
 import { flattenCurlCommand, beautifyCurlCommand, normalizeSmartChars } from './curlFlattener';
@@ -459,6 +501,92 @@ public class OrderService {
 
     assertTrue(deobfuscated.includes('com.acme.financial.controller.PaymentController.executePayment(PaymentController.java:24)'), 'Stack trace should be de-obfuscated accurately');
     assertTrue(deobfuscated.includes('com.acme.financial.service.PaymentService.main(PaymentService.java:15)'), 'Package and class in stack trace should be restored');
+  });
+
+  test('Java Code Obfuscator', 'Obfuscates methods of other classes used by the class, preserves annotations, and obfuscates REST controller paths', () => {
+    const javaCode = `package com.acme.financial.controller;
+
+import com.acme.financial.service.PaymentService;
+import com.acme.financial.client.FraudClient;
+import com.acme.financial.dto.PaymentRequest;
+import com.acme.financial.dto.PaymentResponse;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.beans.factory.annotation.Autowired;
+
+@RestController
+@RequestMapping("/api/v1/payments")
+@CrossOrigin(origins = "*", maxAge = 3600)
+public class PaymentController {
+
+    @Autowired
+    private PaymentService paymentService;
+
+    @Autowired
+    private FraudClient fraudClient;
+
+    @PostMapping("/process/{transactionType}")
+    public PaymentResponse processTransaction(@RequestBody PaymentRequest request) {
+        fraudClient.verifyAccount(request.getAccount());
+        double totalAmount = request.getAmount() * 1.05;
+        boolean isApproved = paymentService.executePayment(request.getAccount(), totalAmount);
+        ExternalHelper.logAuditRecord("Transaction executed");
+        return new PaymentResponse("TXN_123", isApproved, "SUCCESS");
+    }
+}`;
+
+    const res = obfuscateJavaCode(javaCode, {
+      namingStyle: 'alphabetical',
+      obfuscateClasses: true,
+      obfuscateMethods: true,
+      obfuscateExternalMethods: true,
+      obfuscateRestPaths: true,
+      obfuscateVariables: true,
+      obfuscatePackages: true,
+    });
+
+    // 1. External methods of other classes MUST be obfuscated
+    assertTrue(!res.obfuscatedCode.includes('.verifyAccount('), 'External method verifyAccount of FraudClient must be obfuscated');
+    assertTrue(!res.obfuscatedCode.includes('.executePayment('), 'External method executePayment of PaymentService must be obfuscated');
+    assertTrue(!res.obfuscatedCode.includes('.getAmount('), 'External method getAmount of PaymentRequest must be obfuscated');
+    assertTrue(!res.obfuscatedCode.includes('.getAccount('), 'External method getAccount of PaymentRequest must be obfuscated');
+    assertTrue(!res.obfuscatedCode.includes('.logAuditRecord('), 'External static method logAuditRecord must be obfuscated');
+
+    assertTrue(Boolean(res.mapping.methods['verifyAccount']), 'verifyAccount mapped in methods');
+    assertTrue(Boolean(res.mapping.methods['executePayment']), 'executePayment mapped in methods');
+    assertTrue(Boolean(res.mapping.methods['getAmount']), 'getAmount mapped in methods');
+    assertTrue(Boolean(res.mapping.methods['getAccount']), 'getAccount mapped in methods');
+    assertTrue(Boolean(res.mapping.methods['logAuditRecord']), 'logAuditRecord mapped in methods');
+
+    // 2. Annotations and annotation attributes MUST NOT be obfuscated
+    assertTrue(res.obfuscatedCode.includes('@RestController'), '@RestController annotation must NOT be obfuscated');
+    assertTrue(res.obfuscatedCode.includes('@RequestMapping('), '@RequestMapping annotation name must NOT be obfuscated');
+    assertTrue(res.obfuscatedCode.includes('@CrossOrigin(origins = "*", maxAge = 3600)'), '@CrossOrigin annotation and attributes origins/maxAge must NOT be obfuscated');
+    assertTrue(res.obfuscatedCode.includes('@Autowired'), '@Autowired annotation must NOT be obfuscated');
+    assertTrue(res.obfuscatedCode.includes('@PostMapping('), '@PostMapping annotation name must NOT be obfuscated');
+    assertTrue(res.obfuscatedCode.includes('@RequestBody'), '@RequestBody annotation must NOT be obfuscated');
+
+    // 3. REST controller endpoint paths MUST be obfuscated
+    assertTrue(!res.obfuscatedCode.includes('"/api/v1/payments"'), 'Original REST path /api/v1/payments must be obfuscated');
+    assertTrue(!res.obfuscatedCode.includes('"/process/{transactionType}"'), 'Original REST path /process/{transactionType} must be obfuscated');
+    assertTrue(Boolean(res.mapping.paths?.['/api/v1/payments']), 'REST path /api/v1/payments mapped');
+    assertTrue(Boolean(res.mapping.paths?.['/process/{transactionType}']), 'REST path /process/{transactionType} mapped');
+    assertTrue(res.mapping.paths?.['/process/{transactionType}']?.includes('{transactionType}'), 'Path variable template {transactionType} preserved in obfuscated path');
+
+    // 4. De-obfuscation restores code and unquoted curl/log paths
+    const restoredCode = deobfuscateJavaCode(res.obfuscatedCode, res.mapping);
+    assertTrue(restoredCode.includes('verifyAccount'), 'De-obfuscation restores external method verifyAccount');
+    assertTrue(restoredCode.includes('executePayment'), 'De-obfuscation restores external method executePayment');
+    assertTrue(restoredCode.includes('getAmount'), 'De-obfuscation restores external method getAmount');
+    assertTrue(restoredCode.includes('getAccount'), 'De-obfuscation restores external method getAccount');
+    assertTrue(restoredCode.includes('"/api/v1/payments"'), 'De-obfuscation restores REST path /api/v1/payments');
+    assertTrue(restoredCode.includes('"/process/{transactionType}"'), 'De-obfuscation restores REST path /process/{transactionType}');
+    assertTrue(restoredCode.includes('PaymentController'), 'De-obfuscation restores PaymentController class');
+    assertTrue(restoredCode.includes('PaymentService'), 'De-obfuscation restores PaymentService class');
+
+    // Test unquoted REST path in curl / log lines
+    const curlLine = 'curl -X POST http://localhost:8080' + res.mapping.paths?.['/api/v1/payments'] + ' -H "Content-Type: application/json"';
+    const restoredCurl = deobfuscateJavaCode(curlLine, res.mapping);
+    assertTrue(restoredCurl.includes('http://localhost:8080/api/v1/payments'), 'De-obfuscation restores unquoted REST endpoint path in curl command');
   });
 
   // --- Suite 9B: Java Class & Test Dual Obfuscator & De-Obfuscator ---
@@ -4023,6 +4151,590 @@ CREATE TABLE "size_test" (
     assertTrue(ddlOutput.includes('"code" CHARACTER VARYING(25)'), 'DDL output includes CHARACTER VARYING(25)');
     assertTrue(ddlOutput.includes('"rating" NUMERIC(2)'), 'DDL output includes NUMERIC(2)');
     assertTrue(ddlOutput.includes('"cost" NUMERIC(10, 2)'), 'DDL output includes NUMERIC(10, 2)');
+
+    // 5. Data Grid Updates: Resultant queries update based on user grid edits
+    const gridEditedOpts = {
+      ...clampedColOpts,
+      rowCount: 2,
+      customGridRows: [
+        { short_code: 'USER_EDIT_1', small_num: 45 },
+        { short_code: 'USER_EDIT_2', small_num: 'DEFAULT' },
+      ],
+    };
+    const gridResult = generatePostgresInsertQuery(gridEditedOpts);
+    assertTrue(gridResult.sql.includes("'USER_EDIT_1'"), 'SQL query includes user-edited grid cell value USER_EDIT_1');
+    assertTrue(gridResult.sql.includes('45'), 'SQL query includes user-edited numeric cell value 45');
+    assertTrue(gridResult.sql.includes('DEFAULT'), 'SQL query includes user-edited DEFAULT value');
+    assertEqual(gridResult.previewRows?.[0]['short_code'], 'USER_EDIT_1', 'Preview row 0 reflects custom grid short_code');
+    assertEqual(gridResult.previewRows?.[0]['small_num'], 45, 'Preview row 0 reflects custom grid small_num');
+    assertEqual(gridResult.previewRows?.[1]['small_num'], 'DEFAULT', 'Preview row 1 reflects custom grid DEFAULT');
+
+    // 6. User Override for Sample Descriptive Text
+    const loremOpts = {
+      tableName: 'audit_records',
+      schema: 'public',
+      columns: [
+        {
+          id: 'c_default',
+          name: 'default_note',
+          type: 'text' as const,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator' as const,
+          fixedValue: '',
+          valuePool: [],
+          generatorType: 'lorem' as const,
+        },
+        {
+          id: 'c_custom',
+          name: 'custom_note',
+          type: 'text' as const,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator' as const,
+          fixedValue: '',
+          valuePool: [],
+          generatorType: 'lorem' as const,
+          sampleTextTemplate: 'Order audit note for transaction #{row}',
+        },
+        {
+          id: 'c_clamped',
+          name: 'clamped_note',
+          type: 'character varying' as const,
+          maxLength: 15,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator' as const,
+          fixedValue: '',
+          valuePool: [],
+          generatorType: 'lorem' as const,
+          sampleTextTemplate: 'Very long descriptive message #{row}',
+        },
+      ],
+      rowCount: 2,
+      insertStrategy: 'bulk_single_statement' as const,
+      batchSize: 100,
+      conflictStrategy: 'none' as const,
+      conflictTargetColumns: [],
+      conflictUpdateColumns: [],
+      returningClause: '',
+      wrapInTransaction: false,
+      includeTypeCasts: false,
+      includeComments: false,
+    };
+
+    const loremRes = generatePostgresInsertQuery(loremOpts);
+    // Default text
+    assertTrue(loremRes.sql.includes('Sample record entry #1 generated for PostgreSQL integration testing.'), 'Contains default descriptive text');
+    // Custom overridden text
+    assertTrue(loremRes.sql.includes('Order audit note for transaction #1'), 'Contains overridden descriptive text for row 1');
+    assertTrue(loremRes.sql.includes('Order audit note for transaction #2'), 'Contains overridden descriptive text for row 2');
+    // Clamped text
+    assertEqual(String(loremRes.previewRows?.[0]['clamped_note']).length, 15, 'Overridden descriptive text clamped to maxLength 15');
+
+    // Config export and import preserves sampleTextTemplate
+    const exportedConfig = createDbInsertConfigExport(loremOpts);
+    const imported = validateAndParseDbInsertConfig(exportedConfig);
+    assertTrue(imported.success, 'Config with sampleTextTemplate imported successfully');
+    assertEqual(imported.options?.columns[1].sampleTextTemplate, 'Order audit note for transaction #{row}', 'sampleTextTemplate restored from imported JSON');
+
+    // 7. Project Rules & Column Mappings
+    // Rule matching by name, alias, and custom mapping
+    const directRule = findMatchingProjectRule('product', DEFAULT_PROJECT_RULES, DEFAULT_COLUMN_MAPPINGS);
+    assertEqual(directRule?.name, 'product', 'Direct match on product rule');
+
+    const aliasRule = findMatchingProjectRule('item_name', DEFAULT_PROJECT_RULES, DEFAULT_COLUMN_MAPPINGS);
+    assertEqual(aliasRule?.name, 'product', 'Alias match on item_name -> product');
+
+    const mappedRule = findMatchingProjectRule('product_name', DEFAULT_PROJECT_RULES, { product_name: 'product' });
+    assertEqual(mappedRule?.name, 'product', 'Custom mapping match product_name -> product');
+
+    // Applying Project Rules to Columns
+    const testCols: InsertColumnConfig[] = [
+      {
+        id: 'col_a',
+        name: 'product_name',
+        type: 'varchar' as const,
+        nullable: false,
+        hasDefault: false,
+        isPrimaryKey: false,
+        isUnique: false,
+        excludeFromInsert: false,
+        valueMode: 'generator' as const,
+        fixedValue: '',
+        valuePool: [],
+        generatorType: 'name' as const,
+      },
+      {
+        id: 'col_b',
+        name: 'billing_country',
+        type: 'varchar' as const,
+        nullable: true,
+        hasDefault: false,
+        isPrimaryKey: false,
+        isUnique: false,
+        excludeFromInsert: false,
+        valueMode: 'generator' as const,
+        fixedValue: '',
+        valuePool: [],
+        generatorType: 'city' as const,
+      },
+    ];
+
+    const { updatedColumns, matchedCount } = applyProjectRulesToColumns(
+      testCols,
+      DEFAULT_PROJECT_RULES,
+      DEFAULT_COLUMN_MAPPINGS,
+      true
+    );
+
+    assertEqual(matchedCount, 2, '2 columns matched to project rules');
+    assertEqual(updatedColumns[0].linkedProjectRule, 'product', 'product_name linked to product rule');
+    assertEqual(updatedColumns[0].valueMode, 'pool', 'product_name valueMode updated to pool');
+    assertTrue(updatedColumns[0].valuePool.includes('Widget Pro'), 'product_name shares Widget Pro from product rule');
+    assertEqual(updatedColumns[1].linkedProjectRule, 'country', 'billing_country linked to country rule');
+    assertTrue(updatedColumns[1].valuePool.includes('United States'), 'billing_country shares United States from country rule');
+
+    // Export & Import Project Rules JSON
+    const rulesJson = exportProjectRulesJson(DEFAULT_PROJECT_RULES, DEFAULT_COLUMN_MAPPINGS, 'Catalog Project', 'General default note for {col} #{row}');
+    assertTrue(rulesJson.includes('"tool": "db-insert-query-generator"'), 'Includes tool identifier');
+    assertTrue(rulesJson.includes('"product"'), 'Includes product rule in exported JSON');
+    assertTrue(rulesJson.includes('"General default note for {col} #{row}"'), 'Includes generalDescriptiveTextTemplate in exported rules');
+
+    const parsedRules = validateAndParseProjectRulesJson(rulesJson);
+    assertTrue(parsedRules.success, 'Project rules parsed successfully');
+    assertEqual(parsedRules.rules?.length, DEFAULT_PROJECT_RULES.length, 'Restored all default project rules');
+    assertEqual(parsedRules.mappings?.['product_name'], 'product', 'Restored product_name -> product mapping');
+    assertEqual(parsedRules.generalDescriptiveTextTemplate, 'General default note for {col} #{row}', 'Restored generalDescriptiveTextTemplate');
+
+    // 8. General Descriptive Text Template Rule vs Value-Level Configuration Override Hierarchy
+    const hierarchyOpts = {
+      tableName: 'system_audits',
+      schema: 'public',
+      generalDescriptiveTextTemplate: 'General audit log for {table}.{col} #{row}',
+      columns: [
+        {
+          id: 'col_inherited',
+          name: 'standard_note',
+          type: 'text' as const,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator' as const,
+          fixedValue: '',
+          valuePool: [],
+          generatorType: 'lorem' as const,
+          // no column-level override: inherits general rule
+        },
+        {
+          id: 'col_overridden',
+          name: 'vip_note',
+          type: 'text' as const,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator' as const,
+          fixedValue: '',
+          valuePool: [],
+          generatorType: 'lorem' as const,
+          // value-level override: should take priority over general rule
+          sampleTextTemplate: 'Custom VIP specific override #{row}',
+        },
+      ],
+      rowCount: 2,
+      insertStrategy: 'bulk_single_statement' as const,
+      batchSize: 100,
+      conflictStrategy: 'none' as const,
+      conflictTargetColumns: [],
+      conflictUpdateColumns: [],
+      returningClause: '',
+      wrapInTransaction: false,
+      includeTypeCasts: false,
+      includeComments: false,
+    };
+
+    const hierarchyRes = generatePostgresInsertQuery(hierarchyOpts);
+
+    // standard_note inherits general template rule with {table} and {col} and {row}
+    assertTrue(
+      hierarchyRes.sql.includes('General audit log for system_audits.standard_note #1'),
+      'standard_note inherits general descriptive rule for row 1'
+    );
+    assertTrue(
+      hierarchyRes.sql.includes('General audit log for system_audits.standard_note #2'),
+      'standard_note inherits general descriptive rule for row 2'
+    );
+
+    // vip_note uses its own value-level configuration override
+    assertTrue(
+      hierarchyRes.sql.includes('Custom VIP specific override #1'),
+      'vip_note uses value-level override for row 1'
+    );
+    assertTrue(
+      hierarchyRes.sql.includes('Custom VIP specific override #2'),
+      'vip_note uses value-level override for row 2'
+    );
+
+    // Config export and import preserves generalDescriptiveTextTemplate
+    const exportedHierarchyConfig = createDbInsertConfigExport(hierarchyOpts);
+    const importedHierarchy = validateAndParseDbInsertConfig(exportedHierarchyConfig);
+    assertTrue(importedHierarchy.success, 'Imported hierarchy config successfully');
+    assertEqual(
+      importedHierarchy.options?.generalDescriptiveTextTemplate,
+      'General audit log for {table}.{col} #{row}',
+      'generalDescriptiveTextTemplate restored from imported JSON'
+    );
+
+    // 9. Data Grid View Updates Column Rule as Fixed Constant Value
+    const gridFixedOpts = {
+      tableName: 'orders',
+      schema: 'public',
+      columns: [
+        {
+          id: 'col_status',
+          name: 'status',
+          type: 'varchar' as const,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'fixed' as const, // updated to fixed constant rule
+          fixedValue: 'CONFIRMED',
+          valuePool: [],
+          generatorType: 'lorem' as const,
+        },
+        {
+          id: 'col_discount',
+          name: 'discount_pct',
+          type: 'numeric' as const,
+          precision: 4,
+          scale: 2,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'fixed' as const, // updated to fixed constant numeric rule
+          fixedValue: '15.50',
+          valuePool: [],
+          generatorType: 'random_decimal' as const,
+        },
+      ],
+      rowCount: 3,
+      insertStrategy: 'bulk_single_statement' as const,
+      batchSize: 100,
+      conflictStrategy: 'none' as const,
+      conflictTargetColumns: [],
+      conflictUpdateColumns: [],
+      returningClause: '',
+      wrapInTransaction: false,
+      includeTypeCasts: false,
+      includeComments: false,
+    };
+
+    const gridFixedRes = generatePostgresInsertQuery(gridFixedOpts);
+    assertTrue(
+      gridFixedRes.sql.includes("('CONFIRMED', 15.50)"),
+      'Fixed Constant values CONFIRMED and 15.50 properly generated in SQL statement'
+    );
+    assertEqual(gridFixedRes.previewRows?.length, 3, '3 preview rows generated');
+    assertEqual(gridFixedRes.previewRows?.[0]['status'], 'CONFIRMED', 'Preview row 1 has fixed value CONFIRMED');
+    assertEqual(gridFixedRes.previewRows?.[1]['status'], 'CONFIRMED', 'Preview row 2 has fixed value CONFIRMED');
+    assertEqual(gridFixedRes.previewRows?.[2]['status'], 'CONFIRMED', 'Preview row 3 has fixed value CONFIRMED');
+  });
+
+  // =========================================================================
+  // JSON EDITOR TOOL UNIT TESTS
+  // =========================================================================
+  test('JSON Editor', 'Syntax Parsing & Error Detection', () => {
+    // Valid JSON
+    const valid = parseJsonSafe('{"name": "DevHub", "active": true, "version": 2}');
+    assertEqual(valid.error, null, 'Valid JSON parsed without error');
+    assertEqual(valid.data.name, 'DevHub', 'Parsed data name is correct');
+
+    // Invalid JSON with syntax error
+    const invalid = parseJsonSafe('{\n  "unclosed": "string\n}');
+    assertTrue(invalid.error !== null, 'Invalid JSON returns error');
+    assertTrue(invalid.line !== undefined, 'Line number is detected for syntax error');
+  });
+
+  test('JSON Editor', 'Auto-Repair Common Syntax Mistakes', () => {
+    // 1. Single quotes, unquoted keys, trailing commas, python booleans & comments
+    const broken = `{\n  // User config\n  username: 'alex_dev',\n  isActive: True,\n  items: [1, 2, 3,],\n  score: 98.5,\n}`;
+    const repair = tryFixCommonJsonErrors(broken);
+    assertTrue(repair.modified, 'Syntax mistakes repaired');
+    assertTrue(repair.fixes.length > 0, 'Fixes list populated');
+
+    const parsed = parseJsonSafe(repair.fixed);
+    assertEqual(parsed.error, null, 'Repaired JSON parses into valid JSON');
+    assertEqual(parsed.data.username, 'alex_dev', 'Repaired string value matches');
+    assertEqual(parsed.data.isActive, true, 'Python True repaired to boolean true');
+    assertEqual(parsed.data.items.length, 3, 'Trailing comma removed from array');
+  });
+
+  test('JSON Editor', 'Search and Replace Engine', () => {
+    const sample = {
+      title: 'DevHub Platform',
+      metadata: {
+        author: 'DevHub Team',
+        env: 'production',
+        servers: ['devhub-prod-1', 'devhub-prod-2'],
+      },
+      counts: {
+        devhub_users: 1500,
+      },
+    };
+
+    // Count matches case-insensitive
+    const count = countMatches(sample, 'DevHub', {
+      caseSensitive: false,
+      wholeWord: false,
+      useRegex: false,
+      inKeys: true,
+      inValues: true,
+    });
+    assertEqual(count, 5, 'Found 5 matches for "DevHub" across keys and values');
+
+    // Replace all occurrences in keys and values
+    const { result, replaceCount } = searchAndReplaceJson(
+      sample,
+      'DevHub',
+      'AppCore',
+      {
+        caseSensitive: false,
+        wholeWord: false,
+        useRegex: false,
+        inKeys: true,
+        inValues: true,
+      }
+    );
+
+    assertEqual(replaceCount, 5, '5 replacements executed');
+    assertEqual(result.title, 'AppCore Platform', 'String value replaced');
+    assertEqual(result.metadata.author, 'AppCore Team', 'Nested string value replaced');
+    assertTrue('appcore_users' in result.counts, 'Object key was also replaced');
+  });
+
+  test('JSON Editor', 'Tree Operations (Update, Rename, Delete, Insert, Duplicate)', () => {
+    const base = {
+      name: 'Alice',
+      roles: ['admin', 'developer'],
+      profile: {
+        age: 30,
+        city: 'Seattle',
+      },
+    };
+
+    // 1. Update node at path
+    const updated = updateNodeAtPath(base, ['profile', 'city'], 'San Francisco');
+    assertEqual(updated.profile.city, 'San Francisco', 'Updated city at path');
+    assertEqual(base.profile.city, 'Seattle', 'Original object remained immutable');
+
+    // 2. Rename key at path
+    const renamed = renameKeyAtPath(updated, ['profile'], 'city', 'location');
+    assertEqual(renamed.profile.location, 'San Francisco', 'Renamed key city to location');
+    assertEqual(renamed.profile.city, undefined, 'Old key was removed');
+
+    // 3. Insert child into array
+    const insertedArray = insertChildAtPath(renamed, ['roles'], 2, 'maintainer');
+    assertEqual(insertedArray.roles.length, 3, 'Array has 3 items after insert');
+    assertEqual(insertedArray.roles[2], 'maintainer', 'New item appended to array');
+
+    // 4. Duplicate node
+    const duplicated = duplicateNodeAtPath(insertedArray, ['roles', 0]);
+    assertEqual(duplicated.roles.length, 4, 'Array item duplicated');
+    assertEqual(duplicated.roles[1], 'admin', 'Duplicated item is adjacent');
+
+    // 5. Delete node
+    const deleted = deleteNodeAtPath(duplicated, ['profile', 'age']);
+    assertEqual(deleted.profile.age, undefined, 'Deleted profile.age');
+  });
+
+  test('JSON Editor', 'Sorting, Flattening & Conversions', () => {
+    // 1. Sort Keys
+    const unsorted = { z: 1, a: 2, m: { y: 10, b: 20 } };
+    const sorted = sortJsonKeys(unsorted, 'asc', true);
+    assertEqual(Object.keys(sorted).join(','), 'a,m,z', 'Top level keys sorted alphabetically');
+    assertEqual(Object.keys(sorted.m).join(','), 'b,y', 'Nested object keys sorted alphabetically');
+
+    // 2. Flatten and Unflatten
+    const deep = { user: { name: 'Bob', address: { zip: 98101 } } };
+    const flattened = flattenJson(deep);
+    assertEqual(flattened['user.address.zip'], 98101, 'Flattened to dot-notation');
+    const unflattened = unflattenJson(flattened);
+    assertEqual(unflattened.user.address.zip, 98101, 'Unflattened back to deep structure');
+
+    // 3. JSON to CSV and CSV to JSON
+    const tableData = [
+      { id: 1, name: 'Task A', completed: true },
+      { id: 2, name: 'Task B', completed: false },
+    ];
+    const csv = jsonToCsv(tableData);
+    assertTrue(csv.includes('"id","name","completed"'), 'CSV contains header row');
+    const backToJson = csvToJson(csv);
+    assertEqual(backToJson.length, 2, 'CSV converted back to 2 rows');
+    assertEqual(backToJson[0].name, 'Task A', 'Row 0 name matches');
+
+    // 4. JSON to YAML
+    const yaml = jsonToYaml({ server: { port: 8080, host: 'localhost' } });
+    assertTrue(yaml.includes('port: 8080'), 'YAML contains port');
+    const yamlParsed = yamlToJson(yaml);
+    assertEqual(yamlParsed.server.port, 8080, 'YAML parsed back to JSON object');
+
+    // 5. TypeScript generation
+    const tsCode = generateTypeScriptTypes({ id: 'usr_1', count: 42, active: true }, 'User');
+    assertTrue(tsCode.includes('export interface User'), 'TypeScript interface generated');
+    assertTrue(tsCode.includes('id: string;'), 'TypeScript field id typed as string');
+    assertTrue(tsCode.includes('count: number;'), 'TypeScript field count typed as number');
+
+    // 6. JSON Query with expression
+    const queryData = {
+      users: [
+        { name: 'John', age: 25 },
+        { name: 'Jane', age: 32 },
+        { name: 'Dave', age: 19 },
+      ],
+    };
+    const queryResult = queryJsonWithExpression(queryData, 'data.users.filter(u => u.age > 20).map(u => u.name)');
+    assertEqual(queryResult.error, null, 'Query executed successfully');
+    assertEqual(queryResult.result.length, 2, 'Query returned 2 users over 20');
+    assertEqual(queryResult.result[0], 'John', 'First result is John');
+
+    // 7. Calculate stats
+    const stats = calculateJsonStats(queryData, JSON.stringify(queryData, null, 2));
+    assertTrue(stats.nodeCount > 5, 'Stats counted nodes');
+    assertEqual(stats.maxDepth, 4, 'Max depth calculated');
+  });
+
+  // =========================================================================
+  // CSV AUTO POPULATOR UNIT TESTS
+  // =========================================================================
+  test('CSV Auto Populator', 'Header Parsing & Rule Inference', () => {
+    // 1. Header parsing with mixed delimiters and quotes
+    const headers = parseHeadersInput('id, "first_name", last_name, email, salary, status, hire_date');
+    assertEqual(headers.length, 7, 'Parsed 7 headers');
+    assertEqual(headers[0], 'id', 'Header 0 is id');
+    assertEqual(headers[1], 'first_name', 'Header 1 unquoted is first_name');
+
+    // 2. Tab delimiter parsing
+    const tabHeaders = parseHeadersInput('sku\tproduct_name\tcost_price\tstock_qty', '\t');
+    assertEqual(tabHeaders.length, 4, 'Parsed 4 tab headers');
+
+    // 3. Rule inference
+    const idRule = inferColumnRule('user_id', 0);
+    assertEqual(idRule.generatorType, 'sequence', 'Inferred sequence for user_id');
+    assertTrue(Boolean(idRule.unique), 'Enforced unique for ID');
+
+    const emailRule = inferColumnRule('corporate_email', 1);
+    assertEqual(emailRule.generatorType, 'email', 'Inferred email generator');
+
+    const salaryRule = inferColumnRule('annual_salary', 2);
+    assertEqual(salaryRule.generatorType, 'decimal_range', 'Inferred decimal range for salary');
+
+    const statusRule = inferColumnRule('account_status', 3);
+    assertEqual(statusRule.generatorType, 'pick_list', 'Inferred pick list for status');
+
+    const skuRule = inferColumnRule('item_sku', 4);
+    assertEqual(skuRule.generatorType, 'pattern', 'Inferred pattern mask for sku');
+  });
+
+  test('CSV Auto Populator', 'Dataset Generation & Custom Rules', () => {
+    const datasetOpts = {
+      rowCount: 5,
+      delimiter: ',' as const,
+      quoteChar: '"' as const,
+      quoteMode: 'needed' as const,
+      lineEnding: '\n' as const,
+      includeHeader: true,
+      columns: [
+        { id: 'c1', header: 'seq_id', generatorType: 'sequence' as const, startNumber: 100, stepNumber: 10 },
+        { id: 'c2', header: 'sku', generatorType: 'pattern' as const, patternTemplate: 'ITEM-###', unique: true },
+        { id: 'c3', header: 'score', generatorType: 'integer_range' as const, min: 80, max: 99 },
+        { id: 'c4', header: 'rating_pct', generatorType: 'percentage' as const, min: 50, max: 95, decimals: 1 },
+        { id: 'c5', header: 'full_name', generatorType: 'full_name' as const },
+        { id: 'c6', header: 'formula_code', generatorType: 'formula' as const, formulaExpr: '`CODE_${row.seq_id}`' },
+      ],
+    };
+
+    const dataset = generateCsvDataset(datasetOpts);
+    assertEqual(dataset.rows.length, 5, 'Generated 5 rows');
+    assertEqual(dataset.rows[0].seq_id, 100, 'First sequence is 100');
+    assertEqual(dataset.rows[1].seq_id, 110, 'Second sequence is 110');
+    assertTrue(dataset.rows[0].sku.startsWith('ITEM-'), 'Pattern template starts with ITEM-');
+    assertTrue(dataset.rows[0].score >= 80 && dataset.rows[0].score <= 99, 'Integer range within [80, 99]');
+    assertEqual(dataset.rows[0].formula_code, 'CODE_100', 'Formula computed CODE_100 using row.seq_id');
+
+    // Header line check
+    const lines = dataset.csv.split('\n');
+    assertEqual(lines.length, 6, 'CSV contains header + 5 rows');
+    assertTrue(lines[0].includes('seq_id,sku,score,rating_pct,full_name,formula_code'), 'Header row matches columns');
+  });
+
+  test('CSV Auto Populator', 'Resultant Grid Editing & Overrides', () => {
+    const opts = {
+      rowCount: 3,
+      delimiter: ',' as const,
+      quoteChar: '"' as const,
+      quoteMode: 'needed' as const,
+      lineEnding: '\n' as const,
+      includeHeader: true,
+      columns: [
+        { id: 'c1', header: 'code', generatorType: 'fixed' as const, fixedText: 'GEN' },
+        { id: 'c2', header: 'val', generatorType: 'integer_range' as const, min: 1, max: 10 },
+      ],
+      customGridRows: [
+        { code: 'MANUAL_EDIT_A', val: 999 },
+      ],
+    };
+
+    const dataset = generateCsvDataset(opts);
+    assertEqual(dataset.rows[0].code, 'MANUAL_EDIT_A', 'Row 0 code overridden by grid edit');
+    assertEqual(dataset.rows[0].val, 999, 'Row 0 val overridden by grid edit');
+    assertEqual(dataset.rows[1].code, 'GEN', 'Row 1 code retains generated default');
+    assertTrue(dataset.csv.includes('MANUAL_EDIT_A,999'), 'CSV output reflects manual grid edit');
+  });
+
+  test('CSV Auto Populator', 'Configuration Import & Export and SQL Conversion', () => {
+    const configToExport = {
+      ...CSV_POPULATOR_PRESETS[0].options,
+      rowCount: 12,
+    };
+
+    // 1. Export configuration
+    const exported = exportCsvPopulatorConfig(configToExport);
+    assertTrue(exported.includes('"tool": "csv-auto-populator"'), 'Exported JSON includes tool tag');
+    assertTrue(exported.includes('"rowCount": 12'), 'Exported JSON includes rowCount');
+
+    // 2. Validate and Parse configuration
+    const { config, error } = validateAndParseCsvPopulatorConfig(exported);
+    assertEqual(error, null, 'Config imported without error');
+    assertTrue(config !== null, 'Config is not null');
+    assertEqual(config?.rowCount, 12, 'Imported rowCount matches');
+    assertEqual(config?.columns.length, configToExport.columns.length, 'Imported columns count matches');
+
+    // 3. SQL Insert generation
+    const sampleRows = [
+      { id: 101, title: 'Item O\'Connor', active: true, price: 49.99 },
+    ];
+    const sql = csvToSqlInsert('products', sampleRows, ['id', 'title', 'active', 'price']);
+    assertTrue(sql.includes('INSERT INTO "products"'), 'Contains INSERT INTO "products"');
+    assertTrue(sql.includes("'Item O''Connor'"), 'Escapes single quotes into SQL literal');
+    assertTrue(sql.includes('TRUE'), 'Formats boolean as TRUE');
+    assertTrue(sql.includes('49.99'), 'Formats numeric price');
   });
 
   const durationMs = Math.round((performance.now() - startTime) * 100) / 100;

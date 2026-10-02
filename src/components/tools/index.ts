@@ -34,4 +34,6 @@ export * from './QueryObfuscatorTool';
 export * from './PythonObfuscatorTool';
 export * from './ChessConverterTool';
 export * from './db-insert-query-generator/DbInsertQueryGeneratorTool';
+export * from './json-editor/JsonEditorTool';
+export * from './csv-auto-populator/CsvAutoPopulatorTool';
 export * from './GenericTool';

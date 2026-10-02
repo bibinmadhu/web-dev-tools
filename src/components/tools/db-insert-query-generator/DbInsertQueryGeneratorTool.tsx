@@ -34,6 +34,10 @@ import {
   Eye,
   Table,
   ListFilter,
+  Pencil,
+  X,
+  BookOpen,
+  Link as LinkIcon,
 } from 'lucide-react';
 import {
   PostgresInsertType,
@@ -50,10 +54,18 @@ import {
   parsePostgresSchema,
   parsePreferredValuesInput,
   generateCreateTableDdl,
+  generateColumnValue,
 } from '../../../utils/dbInsertQueryGenerator';
+import {
+  DbProjectRule,
+  loadProjectRulesFromStorage,
+  saveProjectRulesToStorage,
+  applyProjectRulesToColumns,
+} from '../../../utils/dbProjectRules';
 import { DbInsertConfigModal } from './DbInsertConfigModal';
 import { PreferredValuesModal } from './PreferredValuesModal';
 import { ExportDdlModal } from './ExportDdlModal';
+import { ProjectRulesModal } from './ProjectRulesModal';
 
 interface DbInsertQueryGeneratorToolProps {
   isFullScreen?: boolean;
@@ -90,6 +102,78 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
   const [ddlInputText, setDdlInputText] = useState('');
   const [ddlError, setDdlError] = useState<string | null>(null);
   const [outputTab, setOutputTab] = useState<'sql' | 'parameters' | 'grid'>('sql');
+
+  // Interactive Data Grid Inline Cell Editing state
+  const [editingCell, setEditingCell] = useState<{ rowIdx: number; colName: string } | null>(null);
+  const [editingCellText, setEditingCellText] = useState<string>('');
+
+  // Project Rules & Mappings state
+  const [showProjectRulesModal, setShowProjectRulesModal] = useState(false);
+  const [projectRules, setProjectRules] = useState<DbProjectRule[]>(() => loadProjectRulesFromStorage().rules);
+  const [projectMappings, setProjectMappings] = useState<Record<string, string>>(() => loadProjectRulesFromStorage().mappings);
+
+  const handleUpdateRulesAndMappings = (
+    newRules: DbProjectRule[],
+    newMappings: Record<string, string>,
+    newGeneralText?: string
+  ) => {
+    setProjectRules(newRules);
+    setProjectMappings(newMappings);
+    saveProjectRulesToStorage(newRules, newMappings, newGeneralText);
+
+    // Sync any columns currently linked to rules whose values were updated
+    setOptions((prev) => {
+      const nextGeneralText = newGeneralText !== undefined ? newGeneralText : prev.generalDescriptiveTextTemplate;
+      const updatedCols = prev.columns.map((col) => {
+        if (col.linkedProjectRule) {
+          const rule = newRules.find((r) => r.name.toLowerCase() === col.linkedProjectRule?.toLowerCase());
+          if (rule) {
+            return {
+              ...col,
+              valuePool: [...rule.values],
+            };
+          }
+        }
+        return col;
+      });
+      return {
+        ...prev,
+        generalDescriptiveTextTemplate: nextGeneralText,
+        columns: updatedCols,
+      };
+    });
+  };
+
+  const handleApplyProjectRulesToCurrentTable = (overwriteExisting = true) => {
+    const { updatedColumns, matchedCount } = applyProjectRulesToColumns(
+      options.columns,
+      projectRules,
+      projectMappings,
+      overwriteExisting
+    );
+    setOptions((prev) => ({
+      ...prev,
+      columns: updatedColumns,
+    }));
+    showStatus(`Applied Project Rules: Linked ${matchedCount} column(s) to shared possible values`);
+  };
+
+  const handleLinkColumnToProjectRule = (colId: string, ruleName: string) => {
+    if (!ruleName) {
+      handleUpdateColumn(colId, { linkedProjectRule: undefined });
+      return;
+    }
+    const targetRule = projectRules.find((r) => r.name.toLowerCase() === ruleName.toLowerCase());
+    if (targetRule) {
+      handleUpdateColumn(colId, {
+        linkedProjectRule: targetRule.name,
+        valueMode: 'pool',
+        valuePool: [...targetRule.values],
+        maxLength: targetRule.maxLength || undefined,
+      });
+      showStatus(`Linked column to Project Rule "${targetRule.name}" (${targetRule.values.length} shared values)`);
+    }
+  };
 
   // Persist options
   useEffect(() => {
@@ -305,7 +389,182 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
   // Reset to default
   const handleReset = () => {
     setOptions(DEFAULT_INSERT_OPTIONS);
+    setEditingCell(null);
     showStatus('Reset to default schema & options.');
+  };
+
+  // Cell editing handlers
+  const handleStartCellEdit = (rowIdx: number, colName: string, currentVal: any) => {
+    setEditingCell({ rowIdx, colName });
+    if (currentVal === null || currentVal === undefined) {
+      setEditingCellText('NULL');
+    } else if (currentVal === 'DEFAULT') {
+      setEditingCellText('DEFAULT');
+    } else if (typeof currentVal === 'object') {
+      setEditingCellText(JSON.stringify(currentVal));
+    } else {
+      setEditingCellText(String(currentVal));
+    }
+  };
+
+  const handleSaveCellEdit = (rowIdx: number, colName: string, rawInput: string) => {
+    const baseRows = queryResult.previewRows || [];
+    const newCustomRows: Record<string, any>[] = options.customGridRows
+      ? options.customGridRows.map((r) => ({ ...r }))
+      : baseRows.map((r) => ({ ...r }));
+
+    while (newCustomRows.length <= rowIdx) {
+      newCustomRows.push({});
+    }
+
+    const trimmed = rawInput.trim();
+    let parsedVal: any = rawInput;
+    let nextValueMode: ValueGenerationMode = 'fixed';
+    let cleanFixedVal = trimmed;
+
+    if (trimmed.toUpperCase() === 'NULL') {
+      parsedVal = null;
+      nextValueMode = 'null';
+      cleanFixedVal = '';
+    } else if (trimmed.toUpperCase() === 'DEFAULT') {
+      parsedVal = 'DEFAULT';
+      nextValueMode = 'default';
+      cleanFixedVal = '';
+    } else {
+      nextValueMode = 'fixed';
+      const col = options.columns.find((c) => c.name === colName);
+      if (col) {
+        if (col.type === 'boolean') {
+          if (['true', 't', '1', 'yes'].includes(trimmed.toLowerCase())) parsedVal = true;
+          else if (['false', 'f', '0', 'no'].includes(trimmed.toLowerCase())) parsedVal = false;
+        } else if (['integer', 'bigint', 'smallint', 'serial', 'bigserial'].includes(col.type)) {
+          const num = parseInt(trimmed, 10);
+          if (!isNaN(num)) parsedVal = num;
+        } else if (['numeric', 'decimal', 'real', 'double precision'].includes(col.type)) {
+          const num = parseFloat(trimmed);
+          if (!isNaN(num)) parsedVal = num;
+        } else if (['json', 'jsonb'].includes(col.type)) {
+          try {
+            parsedVal = JSON.parse(trimmed);
+          } catch {
+            parsedVal = trimmed;
+          }
+        }
+      }
+      // If user typed string with surrounding quotes, strip them for clean fixedValue
+      if (
+        (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) ||
+        (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2)
+      ) {
+        cleanFixedVal = trimmed.slice(1, -1);
+      }
+    }
+
+    // 1. Update the column's generation rule to Fixed Constant value (or NULL/DEFAULT)
+    const updatedColumns = options.columns.map((c) => {
+      if (c.name === colName) {
+        return {
+          ...c,
+          valueMode: nextValueMode,
+          fixedValue: cleanFixedVal,
+        };
+      }
+      return c;
+    });
+
+    // 2. Synchronize all rows in customGridRows for this column to the new fixed value
+    for (let i = 0; i < newCustomRows.length; i++) {
+      newCustomRows[i][colName] = parsedVal;
+    }
+
+    setOptions((prev) => ({
+      ...prev,
+      columns: updatedColumns,
+      customGridRows: newCustomRows,
+    }));
+    setEditingCell(null);
+
+    const statusMsg =
+      nextValueMode === 'fixed'
+        ? `Updated column "${colName}" rule to Fixed Constant "${cleanFixedVal}". SQL updated!`
+        : `Updated column "${colName}" rule to ${nextValueMode.toUpperCase()}. SQL updated!`;
+    showStatus(statusMsg);
+  };
+
+  const handleCancelCellEdit = () => {
+    setEditingCell(null);
+  };
+
+  const handleAddGridRow = () => {
+    const baseRows = queryResult.previewRows || [];
+    const newCustomRows: Record<string, any>[] = options.customGridRows
+      ? options.customGridRows.map((r) => ({ ...r }))
+      : baseRows.map((r) => ({ ...r }));
+
+    const newRowIdx = newCustomRows.length;
+    const newRowObj: Record<string, any> = {};
+    for (const col of options.columns.filter((c) => !c.excludeFromInsert)) {
+      const generated = generateColumnValue(col, newRowIdx, newRowIdx + 1);
+      newRowObj[col.name] = generated.raw;
+    }
+    newCustomRows.push(newRowObj);
+
+    setOptions((prev) => ({
+      ...prev,
+      rowCount: newCustomRows.length,
+      customGridRows: newCustomRows,
+    }));
+    showStatus(`Added row #${newCustomRows.length} to grid.`);
+  };
+
+  const handleDeleteGridRow = (rowIdx: number) => {
+    const baseRows = queryResult.previewRows || [];
+    const currentRows: Record<string, any>[] = options.customGridRows
+      ? options.customGridRows.map((r) => ({ ...r }))
+      : baseRows.map((r) => ({ ...r }));
+
+    if (currentRows.length <= 1) {
+      showStatus('At least 1 row must be retained.');
+      return;
+    }
+
+    currentRows.splice(rowIdx, 1);
+    setOptions((prev) => ({
+      ...prev,
+      rowCount: currentRows.length,
+      customGridRows: currentRows,
+    }));
+    if (editingCell?.rowIdx === rowIdx) {
+      setEditingCell(null);
+    }
+    showStatus(`Deleted row #${rowIdx + 1}.`);
+  };
+
+  const handleDuplicateGridRow = (rowIdx: number) => {
+    const baseRows = queryResult.previewRows || [];
+    const currentRows: Record<string, any>[] = options.customGridRows
+      ? options.customGridRows.map((r) => ({ ...r }))
+      : baseRows.map((r) => ({ ...r }));
+
+    const cloned = { ...currentRows[rowIdx] };
+    currentRows.splice(rowIdx + 1, 0, cloned);
+
+    setOptions((prev) => ({
+      ...prev,
+      rowCount: currentRows.length,
+      customGridRows: currentRows,
+    }));
+    showStatus(`Duplicated row #${rowIdx + 1}.`);
+  };
+
+  const handleResetGridCustomEdits = () => {
+    setOptions((prev) => {
+      const copy = { ...prev };
+      delete copy.customGridRows;
+      return copy;
+    });
+    setEditingCell(null);
+    showStatus('Reset all cells to rule-generated mock values.');
   };
 
   return (
@@ -348,6 +607,19 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
           >
             <Code2 className="w-3.5 h-3.5 text-emerald-500" />
             <span className="hidden sm:inline">Export DDL</span>
+          </button>
+
+          {/* Project Rules & Mappings */}
+          <button
+            onClick={() => setShowProjectRulesModal(true)}
+            className="px-2.5 py-1.5 rounded-lg border border-indigo-300 dark:border-indigo-700/80 bg-indigo-50/70 dark:bg-indigo-950/50 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-2xs"
+            title="Configure shared Project Rules, allowed values pools, and column mappings"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+            <span>Project Rules</span>
+            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-indigo-200 dark:bg-indigo-800 text-indigo-800 dark:text-indigo-200 font-mono">
+              {projectRules.length}
+            </span>
           </button>
 
           {/* Import / Export JSON */}
@@ -523,17 +795,28 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
               </div>
 
               {/* Column Rows Header */}
-              <div className="flex items-center justify-between pt-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                 <div className="text-xs text-slate-500 dark:text-slate-400 font-medium">
                   Configuring {options.columns.filter((c) => !c.excludeFromInsert).length} active column(s) for INSERT:
                 </div>
-                <button
-                  onClick={handleAddColumn}
-                  className="px-2.5 py-1 text-xs font-semibold rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60 hover:bg-indigo-100 flex items-center gap-1 transition-colors"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Add Column</span>
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleApplyProjectRulesToCurrentTable(true)}
+                    className="px-2.5 py-1 text-xs font-semibold rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 flex items-center gap-1.5 transition-colors shadow-2xs"
+                    title="Auto-scan and link columns to shared Project Rules (e.g. product_name -> product)"
+                  >
+                    <BookOpen className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                    <span>Apply Project Rules</span>
+                  </button>
+                  <button
+                    onClick={handleAddColumn}
+                    className="px-2.5 py-1 text-xs font-semibold rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800/60 hover:bg-indigo-100 flex items-center gap-1 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add Column</span>
+                  </button>
+                </div>
               </div>
 
               {/* Scrollable Column List */}
@@ -656,6 +939,19 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
                           <Key className="w-2.5 h-2.5" />
                           <span>PK</span>
                         </button>
+
+                        {/* Linked Project Rule Badge */}
+                        {col.linkedProjectRule && (
+                          <button
+                            type="button"
+                            onClick={() => setShowProjectRulesModal(true)}
+                            className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 flex items-center gap-1 hover:bg-indigo-100 dark:hover:bg-indigo-900 transition-colors"
+                            title={`Linked to Project Rule "${col.linkedProjectRule}". Click to open Project Rules Manager.`}
+                          >
+                            <LinkIcon className="w-2.5 h-2.5 text-indigo-500" />
+                            <span>Rule: {col.linkedProjectRule}</span>
+                          </button>
+                        )}
                       </div>
 
                       {/* Right: Actions (Move, Duplicate, Exclude, Delete) */}
@@ -753,20 +1049,62 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
                           )}
 
                           {col.valueMode === 'pool' && (
-                            <div>
-                              <div className="flex items-center justify-between mb-1">
+                            <div className="space-y-2">
+                              <div className="flex items-center justify-between">
                                 <label className="block text-[10px] text-slate-500 font-medium">
                                   Preferred Values ({col.valuePool.length} defined)
                                 </label>
-                                <button
-                                  type="button"
-                                  onClick={() => setEditingPoolCol(col)}
-                                  className="text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1"
-                                >
-                                  <ListFilter className="w-3 h-3" />
-                                  <span>Spreadsheet / Bulk Pool</span>
-                                </button>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowProjectRulesModal(true)}
+                                    className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1"
+                                    title="Open Project Rules & Mappings"
+                                  >
+                                    <BookOpen className="w-3 h-3" />
+                                    <span>Project Rules</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setEditingPoolCol(col)}
+                                    className="text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-1"
+                                  >
+                                    <ListFilter className="w-3 h-3" />
+                                    <span>Spreadsheet / Bulk Pool</span>
+                                  </button>
+                                </div>
                               </div>
+
+                              {/* Share with Project Rule selector */}
+                              <div className="flex items-center gap-1.5 p-1.5 rounded-lg bg-indigo-50/60 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-[11px]">
+                                <span className="text-indigo-800 dark:text-indigo-300 font-semibold shrink-0 flex items-center gap-1">
+                                  <LinkIcon className="w-3 h-3 text-indigo-500" />
+                                  <span>Share Rule:</span>
+                                </span>
+                                <select
+                                  value={col.linkedProjectRule || ''}
+                                  onChange={(e) => handleLinkColumnToProjectRule(col.id, e.target.value)}
+                                  className="flex-1 px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 text-xs font-mono text-slate-800 dark:text-slate-200 focus:outline-none"
+                                >
+                                  <option value="">(Custom / Unlinked Pool)</option>
+                                  {projectRules.map((rule) => (
+                                    <option key={rule.id} value={rule.name}>
+                                      Rule: {rule.name} ({rule.values.length} values)
+                                    </option>
+                                  ))}
+                                </select>
+                                {col.linkedProjectRule && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleLinkColumnToProjectRule(col.id, '')}
+                                    className="text-[10px] text-rose-500 hover:underline px-1 shrink-0"
+                                    title="Unlink from project rule"
+                                  >
+                                    Unlink
+                                  </button>
+                                )}
+                              </div>
+
                               <div className="flex items-center gap-1.5">
                                 <input
                                   type="text"
@@ -792,36 +1130,132 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
                           )}
 
                           {col.valueMode === 'generator' && (
-                            <div>
-                              <label className="block text-[10px] text-slate-500 font-medium mb-1">
-                                Mock Generator Pattern
-                              </label>
-                              <select
-                                value={col.generatorType}
-                                onChange={(e) =>
-                                  handleUpdateColumn(col.id, {
-                                    generatorType: e.target.value as GeneratorType,
-                                  })
-                                }
-                                className="w-full px-2 py-1 rounded bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono"
-                              >
-                                <option value="sequential_int">Sequential Integer (1, 2, 3...)</option>
-                                <option value="random_int">Random Integer (min..max)</option>
-                                <option value="random_decimal">Random Currency / Decimal</option>
-                                <option value="uuid">UUID v4 (Literal or gen_random_uuid())</option>
-                                <option value="current_timestamp">Timestamp (CURRENT_TIMESTAMP)</option>
-                                <option value="random_date">Random Date (YYYY-MM-DD)</option>
-                                <option value="random_boolean">Random Boolean (TRUE / FALSE)</option>
-                                <option value="name">Realistic Full Name</option>
-                                <option value="email">Realistic Email Address</option>
-                                <option value="username">Realistic Username</option>
-                                <option value="company">Realistic Company Name</option>
-                                <option value="phone">Realistic Phone Number</option>
-                                <option value="city">World City Name</option>
-                                <option value="country_code">Country Code (ISO 2)</option>
-                                <option value="json_object">JSONB Sample Object</option>
-                                <option value="lorem">Sample Descriptive Text</option>
-                              </select>
+                            <div className="space-y-2">
+                              <div>
+                                <label className="block text-[10px] text-slate-500 font-medium mb-1">
+                                  Mock Generator Pattern
+                                </label>
+                                <select
+                                  value={col.generatorType}
+                                  onChange={(e) =>
+                                    handleUpdateColumn(col.id, {
+                                      generatorType: e.target.value as GeneratorType,
+                                    })
+                                  }
+                                  className="w-full px-2 py-1 rounded bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono"
+                                >
+                                  <option value="sequential_int">Sequential Integer (1, 2, 3...)</option>
+                                  <option value="random_int">Random Integer (min..max)</option>
+                                  <option value="random_decimal">Random Currency / Decimal</option>
+                                  <option value="uuid">UUID v4 (Literal or gen_random_uuid())</option>
+                                  <option value="current_timestamp">Timestamp (CURRENT_TIMESTAMP)</option>
+                                  <option value="random_date">Random Date (YYYY-MM-DD)</option>
+                                  <option value="random_boolean">Random Boolean (TRUE / FALSE)</option>
+                                  <option value="name">Realistic Full Name</option>
+                                  <option value="email">Realistic Email Address</option>
+                                  <option value="username">Realistic Username</option>
+                                  <option value="company">Realistic Company Name</option>
+                                  <option value="phone">Realistic Phone Number</option>
+                                  <option value="city">World City Name</option>
+                                  <option value="country_code">Country Code (ISO 2)</option>
+                                  <option value="json_object">JSONB Sample Object</option>
+                                  <option value="lorem">Sample Descriptive Text</option>
+                                </select>
+                              </div>
+
+                              {/* Allow user to override Sample Descriptive Text */}
+                              {col.generatorType === 'lorem' && (
+                                <div className="p-2.5 rounded-lg bg-indigo-50/70 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/70 space-y-1.5">
+                                  <div className="flex flex-wrap items-center justify-between gap-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <FileText className="w-3.5 h-3.5 text-indigo-500" />
+                                      <label className="text-[10px] font-semibold text-indigo-900 dark:text-indigo-200">
+                                        Descriptive Text Template:
+                                      </label>
+                                      {col.sampleTextTemplate ? (
+                                        <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-800 font-semibold">
+                                          Value Override Active
+                                        </span>
+                                      ) : options.generalDescriptiveTextTemplate ? (
+                                        <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-indigo-100 dark:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-800 font-medium">
+                                          Inheriting General Rule
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                    <span className="text-[9px] text-indigo-500 dark:text-indigo-400 font-mono">
+                                      Use &#123;row&#125;, &#123;col&#125;, &#123;table&#125;
+                                    </span>
+                                  </div>
+
+                                  <input
+                                    type="text"
+                                    value={col.sampleTextTemplate !== undefined ? col.sampleTextTemplate : col.generatorOptions?.sampleTextTemplate || ''}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      handleUpdateColumn(col.id, {
+                                        sampleTextTemplate: val,
+                                        generatorOptions: {
+                                          ...col.generatorOptions,
+                                          sampleTextTemplate: val,
+                                        },
+                                      });
+                                    }}
+                                    placeholder={
+                                      options.generalDescriptiveTextTemplate
+                                        ? `Inheriting: "${options.generalDescriptiveTextTemplate}" (Type here for column override)`
+                                        : 'Default: Sample record entry #{row} generated for PostgreSQL integration testing.'
+                                    }
+                                    className="w-full px-2.5 py-1 text-xs font-mono rounded bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
+                                  />
+
+                                  <div className="flex flex-wrap items-center justify-between gap-1 pt-0.5">
+                                    <div className="flex flex-wrap items-center gap-1">
+                                      <span className="text-[9px] text-slate-500 dark:text-slate-400 font-medium">Quick templates:</span>
+                                      {[
+                                        'Order note for transaction #{row}',
+                                        'Security audit event #{row} from api-gateway',
+                                        'Product catalog description for item #{row}',
+                                        'Customer feedback statement #{row}',
+                                      ].map((sampleStr, sIdx) => (
+                                        <button
+                                          key={sIdx}
+                                          type="button"
+                                          onClick={() => {
+                                            handleUpdateColumn(col.id, {
+                                              sampleTextTemplate: sampleStr,
+                                              generatorOptions: {
+                                                ...col.generatorOptions,
+                                                sampleTextTemplate: sampleStr,
+                                              },
+                                            });
+                                          }}
+                                          className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900 transition-colors"
+                                        >
+                                          {sampleStr.split(' ')[0]} {sampleStr.split(' ')[1]}...
+                                        </button>
+                                      ))}
+                                    </div>
+
+                                    {(col.sampleTextTemplate || col.generatorOptions?.sampleTextTemplate) && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          handleUpdateColumn(col.id, {
+                                            sampleTextTemplate: '',
+                                            generatorOptions: {
+                                              ...col.generatorOptions,
+                                              sampleTextTemplate: '',
+                                            },
+                                          });
+                                        }}
+                                        className="text-[9px] text-rose-500 hover:underline font-medium"
+                                      >
+                                        {options.generalDescriptiveTextTemplate ? 'Revert to General Rule' : 'Reset to Default'}
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           )}
 
@@ -986,6 +1420,60 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
                       </button>
                     ))}
                   </div>
+                </div>
+              </div>
+
+              {/* General Descriptive Text Rule */}
+              <div className="p-3.5 rounded-xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                    <label className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                      General Descriptive Text Template Rule
+                    </label>
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-mono">
+                    Placeholders: &#123;row&#125;, &#123;col&#125;, &#123;table&#125;
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Global template rule for all columns using the <span className="font-semibold text-slate-700 dark:text-slate-300">Sample Descriptive Text</span> pattern in this table. Individual columns can still override this at the value level.
+                </p>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={options.generalDescriptiveTextTemplate || ''}
+                    onChange={(e) => setOptions((prev) => ({ ...prev, generalDescriptiveTextTemplate: e.target.value }))}
+                    placeholder="Default: Sample record entry #{row} generated for PostgreSQL integration testing."
+                    className="flex-1 px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 font-mono text-xs text-slate-800 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500"
+                  />
+                  {options.generalDescriptiveTextTemplate && (
+                    <button
+                      type="button"
+                      onClick={() => setOptions((prev) => ({ ...prev, generalDescriptiveTextTemplate: '' }))}
+                      className="px-2.5 py-1.5 text-xs text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors font-medium"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                  <span className="text-[10px] text-slate-400 font-medium">Quick presets:</span>
+                  {[
+                    'Record for {table} #{row}: {col} details',
+                    'Integration test record #{row} ({col})',
+                    'Audit log event #{row} for {table}',
+                    'Production test fixture note #{row}',
+                  ].map((presetStr, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setOptions((prev) => ({ ...prev, generalDescriptiveTextTemplate: presetStr }))}
+                      className="text-[10px] font-mono px-2 py-0.5 rounded bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900 transition-colors"
+                    >
+                      {presetStr.split(' ')[0]} {presetStr.split(' ')[1]}...
+                    </button>
+                  ))}
                 </div>
               </div>
 
@@ -1211,50 +1699,227 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
             )}
 
             {outputTab === 'grid' && (
-              <div className="w-full h-full overflow-auto">
-                <table className="w-full text-left font-mono text-[11px] border-collapse">
-                  <thead className="sticky top-0 bg-slate-900 border-b border-slate-800 shadow-xs z-10">
-                    <tr>
-                      <th className="p-2 w-10 text-slate-500 font-semibold">#</th>
-                      {queryResult.columnsIncluded.map((cName) => (
-                        <th key={cName} className="p-2 text-indigo-300 font-semibold whitespace-nowrap">
-                          {cName}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60">
-                    {queryResult.previewRows && queryResult.previewRows.length > 0 ? (
-                      queryResult.previewRows.map((row, rIdx) => (
-                        <tr key={rIdx} className="hover:bg-slate-900/60 transition-colors">
-                          <td className="p-2 text-slate-500 font-mono text-[10px] select-none">{rIdx + 1}</td>
-                          {queryResult.columnsIncluded.map((cName) => {
-                            const val = row[cName];
-                            return (
-                              <td key={cName} className="p-2 whitespace-nowrap font-mono text-emerald-300">
-                                {val === null || val === undefined ? (
-                                  <span className="text-slate-500 italic">NULL</span>
-                                ) : val === 'DEFAULT' ? (
-                                  <span className="text-indigo-400 font-semibold">DEFAULT</span>
-                                ) : typeof val === 'object' ? (
-                                  <span className="text-amber-300">{JSON.stringify(val)}</span>
-                                ) : (
-                                  String(val)
-                                )}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td colSpan={queryResult.columnsIncluded.length + 1} className="p-6 text-center text-slate-500 italic">
-                          No active columns selected. Please uncheck "Exclude" on at least one column.
-                        </td>
-                      </tr>
+              <div className="w-full h-full flex flex-col overflow-hidden">
+                {/* Data Grid Toolbar & Controls */}
+                <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-slate-900 border-b border-slate-800 shrink-0 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-slate-300 text-[11px]">Editable Data Grid:</span>
+                    <span className="text-[10px] text-slate-400">Click any cell to modify. SQL query updates immediately.</span>
+                    {options.customGridRows && options.customGridRows.length > 0 && (
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 flex items-center gap-1">
+                        <Sparkles className="w-3 h-3 text-indigo-400" />
+                        <span>Custom edits active</span>
+                      </span>
                     )}
-                  </tbody>
-                </table>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={handleAddGridRow}
+                      className="px-2 py-0.5 rounded text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center gap-1 transition-colors"
+                      title="Add a new row to the table"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>Add Row</span>
+                    </button>
+
+                    {options.customGridRows && options.customGridRows.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleResetGridCustomEdits}
+                        className="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center gap-1 transition-colors"
+                        title="Revert all manual edits back to column generator rules"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>Reset Grid</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Table Viewport */}
+                <div className="flex-1 overflow-auto">
+                  <table className="w-full text-left font-mono text-[11px] border-collapse">
+                    <thead className="sticky top-0 bg-slate-900 border-b border-slate-800 shadow-xs z-10">
+                      <tr>
+                        <th className="p-2 w-10 text-slate-500 font-semibold select-none text-center">#</th>
+                        {queryResult.columnsIncluded.map((cName) => {
+                          const colDef = options.columns.find((c) => c.name === cName);
+                          return (
+                            <th key={cName} className="p-2 text-indigo-300 font-semibold whitespace-nowrap">
+                              <div className="flex items-center gap-1.5">
+                                <span>{cName}</span>
+                                {colDef && (
+                                  <span
+                                    className={`text-[9px] font-normal px-1 rounded border ${
+                                      colDef.valueMode === 'fixed'
+                                        ? 'bg-amber-950/80 text-amber-300 border-amber-700/80 font-semibold'
+                                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                                    }`}
+                                    title={
+                                      colDef.valueMode === 'fixed'
+                                        ? `Rule: Fixed Constant "${colDef.fixedValue}"`
+                                        : `Type: ${colDef.type}, Rule: ${colDef.valueMode}`
+                                    }
+                                  >
+                                    {colDef.valueMode === 'fixed'
+                                      ? `FIXED: ${colDef.fixedValue.length > 10 ? colDef.fixedValue.slice(0, 10) + '…' : colDef.fixedValue || '""'}`
+                                      : `${colDef.type}${colDef.maxLength ? `(${colDef.maxLength})` : colDef.precision ? `(${colDef.precision}${colDef.scale ? `,${colDef.scale}` : ''})` : ''}`}
+                                  </span>
+                                )}
+                              </div>
+                            </th>
+                          );
+                        })}
+                        <th className="p-2 w-20 text-slate-500 font-semibold text-right pr-3 select-none">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {queryResult.previewRows && queryResult.previewRows.length > 0 ? (
+                        queryResult.previewRows.map((row, rIdx) => (
+                          <tr key={rIdx} className="hover:bg-slate-900/60 transition-colors group">
+                            <td className="p-2 text-slate-500 font-mono text-[10px] select-none text-center">{rIdx + 1}</td>
+                            {queryResult.columnsIncluded.map((cName) => {
+                              const val = row[cName];
+                              const isEditing = editingCell?.rowIdx === rIdx && editingCell?.colName === cName;
+                              const isCustom = options.customGridRows?.[rIdx]?.[cName] !== undefined;
+
+                              return (
+                                <td
+                                  key={cName}
+                                  className={`p-1.5 whitespace-nowrap font-mono transition-colors relative ${
+                                    isEditing ? 'bg-indigo-950/40' : 'cursor-pointer hover:bg-slate-800/40'
+                                  }`}
+                                  onClick={() => {
+                                    if (!isEditing) {
+                                      handleStartCellEdit(rIdx, cName, val);
+                                    }
+                                  }}
+                                  title={isEditing ? undefined : 'Click to edit this cell value'}
+                                >
+                                  {isEditing ? (
+                                    <div
+                                      className="flex flex-col gap-1 bg-slate-900 p-1.5 rounded-lg border border-indigo-500 shadow-2xl z-20"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <div className="flex items-center gap-1.5">
+                                        <input
+                                          type="text"
+                                          autoFocus
+                                          value={editingCellText}
+                                          onChange={(e) => setEditingCellText(e.target.value)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                              handleSaveCellEdit(rIdx, cName, editingCellText);
+                                            } else if (e.key === 'Escape') {
+                                              handleCancelCellEdit();
+                                            }
+                                          }}
+                                          className="px-2 py-0.5 bg-slate-950 text-white rounded text-xs font-mono border border-slate-700 focus:outline-none focus:border-indigo-400 min-w-[150px]"
+                                          placeholder="Enter constant value"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSaveCellEdit(rIdx, cName, editingCellText)}
+                                          className="p-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+                                          title="Save & update column rule to Fixed Constant (Enter)"
+                                        >
+                                          <Check className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={handleCancelCellEdit}
+                                          className="p-1 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors"
+                                          title="Cancel (Esc)"
+                                        >
+                                          <X className="w-3.5 h-3.5" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSaveCellEdit(rIdx, cName, 'NULL')}
+                                          className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700"
+                                          title="Set column rule to SQL NULL"
+                                        >
+                                          NULL
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleSaveCellEdit(rIdx, cName, 'DEFAULT')}
+                                          className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-slate-700"
+                                          title="Set column rule to SQL DEFAULT"
+                                        >
+                                          DEF
+                                        </button>
+                                      </div>
+                                      <span className="text-[9px] text-amber-400 font-sans flex items-center gap-1">
+                                        <span>⚡</span>
+                                        <span>Updates SQL &amp; sets column rule to Fixed Constant</span>
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <div className="flex items-center justify-between gap-2 px-1">
+                                      <span className={val === null || val === undefined ? 'text-slate-500 italic' : val === 'DEFAULT' ? 'text-indigo-400 font-semibold' : typeof val === 'object' ? 'text-amber-300' : 'text-emerald-300'}>
+                                        {val === null || val === undefined ? (
+                                          'NULL'
+                                        ) : val === 'DEFAULT' ? (
+                                          'DEFAULT'
+                                        ) : typeof val === 'object' ? (
+                                          JSON.stringify(val)
+                                        ) : (
+                                          String(val)
+                                        )}
+                                      </span>
+
+                                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        {isCustom && (
+                                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-400" title="Manually edited cell" />
+                                        )}
+                                        <Pencil className="w-2.5 h-2.5 text-slate-500 hover:text-indigo-400" />
+                                      </div>
+                                    </div>
+                                  )}
+                                </td>
+                              );
+                            })}
+                            <td className="p-1.5 text-right pr-3 select-none">
+                              <div className="flex items-center justify-end gap-1 opacity-40 group-hover:opacity-100 transition-opacity">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDuplicateGridRow(rIdx);
+                                  }}
+                                  className="p-1 rounded text-slate-400 hover:text-indigo-400 hover:bg-slate-800 transition-colors"
+                                  title="Duplicate this row"
+                                >
+                                  <Copy className="w-3 h-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteGridRow(rIdx);
+                                  }}
+                                  className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition-colors"
+                                  title="Delete this row"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td colSpan={queryResult.columnsIncluded.length + 2} className="p-6 text-center text-slate-500 italic">
+                            No active columns selected. Please uncheck "Exclude" on at least one column.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
           </div>
@@ -1451,6 +2116,18 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
         onClose={() => setShowExportDdlModal(false)}
         ddlSql={generateCreateTableDdl(options)}
         tableName={options.tableName}
+      />
+
+      {/* Project Rules & Mappings Modal */}
+      <ProjectRulesModal
+        isOpen={showProjectRulesModal}
+        onClose={() => setShowProjectRulesModal(false)}
+        rules={projectRules}
+        mappings={projectMappings}
+        generalDescriptiveTextTemplate={options.generalDescriptiveTextTemplate || ''}
+        onUpdateRulesAndMappings={handleUpdateRulesAndMappings}
+        currentTableColumns={options.columns}
+        onApplyRulesToTable={handleApplyProjectRulesToCurrentTable}
       />
     </div>
   );

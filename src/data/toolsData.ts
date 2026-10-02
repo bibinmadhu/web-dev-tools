@@ -12,6 +12,16 @@ export const TOOLS_DATA: DevTool[] = [
     isPopular: true,
   },
   {
+    id: 'json-editor',
+    name: 'JSON Editor',
+    description: 'Direct tree & raw editing, deep search & replace, queries, sorting & conversion',
+    category: 'formatters',
+    tags: ['JSON', 'Editor', 'Tree', 'Replace', 'Search', 'Query', 'TypeScript', 'YAML', 'CSV', 'Format'],
+    iconText: '{✏️}',
+    iconType: 'json',
+    isPopular: true,
+  },
+  {
     id: 'code-obfuscator',
     name: 'Code Obfuscator',
     description: 'Mangle & encode JS/TS',
@@ -214,6 +224,16 @@ export const TOOLS_DATA: DevTool[] = [
     tags: ['QR Code', 'Generator', 'Barcode', 'Wi-Fi', 'vCard', 'Vector', 'SVG', 'Design'],
     iconText: 'QR',
     iconType: 'qr',
+    isPopular: true,
+  },
+  {
+    id: 'csv-auto-populator',
+    name: 'CSV Auto Populator',
+    description: 'Generate realistic CSV datasets from user headers with custom column rules, live editable grid, import/export rules & SQL export',
+    category: 'generators',
+    tags: ['CSV', 'Generator', 'Dataset', 'Mock Data', 'Populator', 'Table', 'Spreadsheet', 'Excel', 'Rules', 'Export'],
+    iconText: 'CSV',
+    iconType: 'table',
     isPopular: true,
   },
   {

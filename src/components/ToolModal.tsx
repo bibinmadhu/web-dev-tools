@@ -38,6 +38,8 @@ import {
   PythonObfuscatorTool,
   ChessConverterTool,
   DbInsertQueryGeneratorTool,
+  JsonEditorTool,
+  CsvAutoPopulatorTool,
   GenericTool,
 } from './tools';
 
@@ -123,6 +125,22 @@ export const ToolModal: React.FC<ToolModalProps> = ({
     if (tool.id === 'db-insert-query-generator') {
       try {
         const saved = localStorage.getItem('devhub_fullscreen_db_insert');
+        return saved !== null ? saved === 'true' : false;
+      } catch (e) {
+        return false;
+      }
+    }
+    if (tool.id === 'json-editor') {
+      try {
+        const saved = localStorage.getItem('devhub_fullscreen_json_editor');
+        return saved !== null ? saved === 'true' : false;
+      } catch (e) {
+        return false;
+      }
+    }
+    if (tool.id === 'csv-auto-populator') {
+      try {
+        const saved = localStorage.getItem('devhub_fullscreen_csv_populator');
         return saved !== null ? saved === 'true' : false;
       } catch (e) {
         return false;
@@ -216,6 +234,20 @@ export const ToolModal: React.FC<ToolModalProps> = ({
       } catch (e) {
         setIsFullScreen(false);
       }
+    } else if (tool?.id === 'json-editor') {
+      try {
+        const saved = localStorage.getItem('devhub_fullscreen_json_editor');
+        setIsFullScreen(saved !== null ? saved === 'true' : false);
+      } catch (e) {
+        setIsFullScreen(false);
+      }
+    } else if (tool?.id === 'csv-auto-populator') {
+      try {
+        const saved = localStorage.getItem('devhub_fullscreen_csv_populator');
+        setIsFullScreen(saved !== null ? saved === 'true' : false);
+      } catch (e) {
+        setIsFullScreen(false);
+      }
     } else {
       setIsFullScreen(false);
     }
@@ -293,6 +325,18 @@ export const ToolModal: React.FC<ToolModalProps> = ({
       } else if (tool?.id === 'db-insert-query-generator') {
         try {
           localStorage.setItem('devhub_fullscreen_db_insert', String(next));
+        } catch (e) {
+          // ignore
+        }
+      } else if (tool?.id === 'json-editor') {
+        try {
+          localStorage.setItem('devhub_fullscreen_json_editor', String(next));
+        } catch (e) {
+          // ignore
+        }
+      } else if (tool?.id === 'csv-auto-populator') {
+        try {
+          localStorage.setItem('devhub_fullscreen_csv_populator', String(next));
         } catch (e) {
           // ignore
         }
@@ -442,6 +486,20 @@ export const ToolModal: React.FC<ToolModalProps> = ({
             onToggleFullScreen={handleToggleFullScreen}
           />
         );
+      case 'json-editor':
+        return (
+          <JsonEditorTool
+            isFullScreen={isFullScreen}
+            onToggleFullScreen={handleToggleFullScreen}
+          />
+        );
+      case 'csv-auto-populator':
+        return (
+          <CsvAutoPopulatorTool
+            isFullScreen={isFullScreen}
+            onToggleFullScreen={handleToggleFullScreen}
+          />
+        );
       default:
         return <GenericTool tool={tool} />;
     }
@@ -450,6 +508,8 @@ export const ToolModal: React.FC<ToolModalProps> = ({
   const isWideModal = [
     'chess-converter',
     'db-insert-query-generator',
+    'json-editor',
+    'csv-auto-populator',
     'java-dual-obfuscator',
     'java-obfuscator',
     'python-obfuscator',
