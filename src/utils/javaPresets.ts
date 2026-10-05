@@ -123,5 +123,59 @@ public class OrderRepository {
       "a": "executePayment",
       "b": "processTransaction"
     }
+  },
+  {
+    id: 'rest-controller-deobf-sample',
+    name: 'Obfuscated REST Controller & Endpoints (De-obf test)',
+    description: 'Obfuscated Spring Boot REST controller, curl commands and mockMvc tests with path mapping',
+    category: 'stacktrace',
+    code: `package pkg_a.pkg_b.pkg_c.pkg_d;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.beans.factory.annotation.Autowired;
+
+@RestController
+@RequestMapping("/p_a/p_b")
+public class A {
+
+    @Autowired
+    private B v_a;
+
+    @PostMapping("/p_c")
+    public D a(@RequestBody C v_b) {
+        return v_a.b(v_b.c());
+    }
+}
+
+// Client Verification & Endpoint Invocations:
+// curl -X POST http://localhost:8080/p_a/p_b/p_c -H "Content-Type: application/json"
+// mockMvc.perform(post("/p_a/p_b/p_c"))`,
+    sampleMapping: {
+      classes: {
+        PaymentController: "A",
+        PaymentService: "B",
+        PaymentRequest: "C",
+        PaymentResponse: "D"
+      },
+      variables: {
+        paymentService: "v_a",
+        request: "v_b"
+      },
+      methods: {
+        processTransaction: "a",
+        executePayment: "b",
+        getAmount: "c"
+      },
+      packages: {
+        com: "pkg_a",
+        acme: "pkg_b",
+        financial: "pkg_c",
+        controller: "pkg_d"
+      },
+      paths: {
+        "/api/payments": "/p_a/p_b",
+        "/process": "/p_c"
+      }
+    } as any
   }
 ];

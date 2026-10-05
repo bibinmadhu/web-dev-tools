@@ -40,6 +40,7 @@ import {
   DbInsertQueryGeneratorTool,
   JsonEditorTool,
   CsvAutoPopulatorTool,
+  DbRowCopyTool,
   GenericTool,
 } from './tools';
 
@@ -500,12 +501,20 @@ export const ToolModal: React.FC<ToolModalProps> = ({
             onToggleFullScreen={handleToggleFullScreen}
           />
         );
+      case 'db-row-copy':
+        return (
+          <DbRowCopyTool
+            isFullScreen={isFullScreen}
+            onToggleFullScreen={handleToggleFullScreen}
+          />
+        );
       default:
         return <GenericTool tool={tool} />;
     }
   };
 
   const isWideModal = [
+    'db-row-copy',
     'chess-converter',
     'db-insert-query-generator',
     'json-editor',

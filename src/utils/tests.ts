@@ -136,6 +136,15 @@ import {
   CSV_POPULATOR_PRESETS,
 } from './csvAutoPopulator';
 import {
+  parseCreateTableDdl,
+  generateRowCopySql,
+  simulateRowCopy,
+  formatSqlLiteral,
+  buildColumnSqlExpression,
+  DB_ROW_COPY_PRESETS,
+  DbRowCopyConfig,
+} from './dbRowCopyGenerator';
+import {
   DbProjectRule,
   findMatchingProjectRule,
   applyProjectRulesToColumns,
@@ -587,6 +596,26 @@ public class PaymentController {
     const curlLine = 'curl -X POST http://localhost:8080' + res.mapping.paths?.['/api/v1/payments'] + ' -H "Content-Type: application/json"';
     const restoredCurl = deobfuscateJavaCode(curlLine, res.mapping);
     assertTrue(restoredCurl.includes('http://localhost:8080/api/v1/payments'), 'De-obfuscation restores unquoted REST endpoint path in curl command');
+
+    // 5. De-obfuscation of composite endpoint URLs, MockMvc tests, and HTTP access logs
+    const obfClassPath = res.mapping.paths?.['/api/v1/payments']!;
+    const obfMethodPath = res.mapping.paths?.['/process/{transactionType}']!;
+    const compositeUrl = `http://localhost:8080${obfClassPath}${obfMethodPath}`;
+    const restoredComposite = deobfuscateJavaCode(compositeUrl, res.mapping);
+    assertTrue(restoredComposite.includes('http://localhost:8080/api/v1/payments/process/{transactionType}'), 'De-obfuscation restores composite REST controller URLs');
+
+    const mockMvcLine = `mockMvc.perform(post("${obfClassPath}${obfMethodPath}"))`;
+    const restoredMockMvc = deobfuscateJavaCode(mockMvcLine, res.mapping);
+    assertTrue(restoredMockMvc.includes('mockMvc.perform(post("/api/v1/payments/process/{transactionType}"))'), 'De-obfuscation restores composite endpoint paths in MockMvc tests');
+
+    const httpLogLine = `POST ${obfClassPath}${obfMethodPath}?debug=true HTTP/1.1`;
+    const restoredHttpLog = deobfuscateJavaCode(httpLogLine, res.mapping);
+    assertTrue(restoredHttpLog.includes('POST /api/v1/payments/process/{transactionType}?debug=true HTTP/1.1'), 'De-obfuscation restores composite REST endpoint in HTTP server logs');
+
+    // Test dynamic path with actual param value
+    const dynamicUrl = `http://localhost:8080${obfClassPath}/9981`;
+    const restoredDynamic = deobfuscateJavaCode(dynamicUrl, res.mapping);
+    assertTrue(restoredDynamic.includes('http://localhost:8080/api/v1/payments/9981'), 'De-obfuscation restores REST prefix when followed by path variable values');
   });
 
   // --- Suite 9B: Java Class & Test Dual Obfuscator & De-Obfuscator ---
@@ -4735,6 +4764,182 @@ CREATE TABLE "size_test" (
     assertTrue(sql.includes("'Item O''Connor'"), 'Escapes single quotes into SQL literal');
     assertTrue(sql.includes('TRUE'), 'Formats boolean as TRUE');
     assertTrue(sql.includes('49.99'), 'Formats numeric price');
+  });
+
+  // --- Suite: Database Row Copy Tool ---
+  test('Database Row Copy Tool', 'CREATE TABLE DDL Schema Parsing', () => {
+    const ddl = `
+      CREATE TABLE sales.orders (
+        order_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        customer_id BIGINT NOT NULL,
+        order_code VARCHAR(64) NOT NULL,
+        total_amount NUMERIC(10,2) NOT NULL,
+        status VARCHAR(24) DEFAULT 'PENDING',
+        is_paid BOOLEAN DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+    `;
+
+    const parsed = parseCreateTableDdl(ddl);
+    assertEqual(parsed.tableName, 'orders', 'Parsed table name');
+    assertEqual(parsed.schemaName, 'sales', 'Parsed schema name');
+    assertEqual(parsed.columns.length, 7, 'Parsed 7 columns');
+
+    const orderIdCol = parsed.columns.find((c) => c.name === 'order_id');
+    assertTrue(Boolean(orderIdCol?.isPrimaryKey), 'order_id is detected as primary key');
+    assertEqual(orderIdCol?.type, 'UUID', 'order_id type is UUID');
+
+    const totalAmountCol = parsed.columns.find((c) => c.name === 'total_amount');
+    assertEqual(totalAmountCol?.type, 'NUMERIC', 'total_amount type is NUMERIC');
+
+    const statusCol = parsed.columns.find((c) => c.name === 'status');
+    assertEqual(statusCol?.defaultValue, "'PENDING'", 'status default value parsed');
+  });
+
+  test('Database Row Copy Tool', 'Default ID and Overridden Lookup Column', () => {
+    const preset = DB_ROW_COPY_PRESETS[0]; // orders table with order_id PK
+
+    // 1. Default ID lookup
+    const defaultRes = generateRowCopySql({
+      ...preset,
+      lookupColumn: 'order_id',
+      lookupValue: 'e89b21f3-4a11-477c-a0e2-76bf38d99042',
+      lookupOperator: '=',
+    });
+    assertTrue(defaultRes.sql.includes("WHERE order_id = 'e89b21f3-4a11-477c-a0e2-76bf38d99042'"), 'Default ID lookup generates exact WHERE clause');
+
+    // 2. Overridden lookup column to another column (order_code)
+    const customLookupRes = generateRowCopySql({
+      ...preset,
+      lookupColumn: 'order_code',
+      lookupValue: 'ORD-2026-9041',
+      lookupOperator: '=',
+    });
+    assertTrue(customLookupRes.sql.includes("WHERE order_code = 'ORD-2026-9041'"), 'Overridden lookup column generates WHERE on custom column');
+
+    // 3. Batch lookup with IN operator
+    const batchRes = generateRowCopySql({
+      ...preset,
+      lookupColumn: 'customer_id',
+      lookupValue: '99482, 99483, 99484',
+      lookupOperator: 'IN',
+    });
+    assertTrue(batchRes.sql.includes('WHERE customer_id IN (99482, 99483, 99484)'), 'Numeric batch IN operator formats unquoted integer list');
+  });
+
+  test('Database Row Copy Tool', 'Column Overrides Across Constant, Expression, Suffix & Exclude Modes', () => {
+    const config: DbRowCopyConfig = {
+      id: 'test_copy',
+      name: 'User Clone Test',
+      tableName: 'users',
+      schemaName: 'public',
+      columns: [
+        { id: '1', name: 'id', type: 'UUID', isPrimaryKey: true, isNullable: false },
+        { id: '2', name: 'username', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+        { id: '3', name: 'email', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+        { id: '4', name: 'status', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+        { id: '5', name: 'role', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+        { id: '6', name: 'login_count', type: 'INTEGER', isPrimaryKey: false, isNullable: false },
+        { id: '7', name: 'created_at', type: 'TIMESTAMP', isPrimaryKey: false, isNullable: false },
+      ],
+      lookupColumn: 'id',
+      lookupValue: '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d',
+      lookupOperator: '=',
+      overrides: {
+        id: { columnName: 'id', mode: 'mock_random', randomType: 'uuid', active: true },
+        username: { columnName: 'username', mode: 'prefix_suffix', suffix: '_CLONE', active: true },
+        email: { columnName: 'email', mode: 'prefix_suffix', prefix: 'clone_', suffix: '.org', active: true },
+        status: { columnName: 'status', mode: 'constant', constantValue: 'DRAFT', active: true },
+        login_count: { columnName: 'login_count', mode: 'constant', constantValue: '0', active: true },
+        created_at: { columnName: 'created_at', mode: 'expression', expression: 'CURRENT_TIMESTAMP', active: true },
+        // role is intentionally not in overrides -> copied verbatim
+      },
+      options: {
+        dialect: 'postgres',
+        useTransaction: true,
+        rollbackOnly: false,
+        includeReturning: true,
+        returningColumns: '*',
+        copyCount: 1,
+        strategy: 'insert_select',
+        generatePythonScript: false,
+      },
+    };
+
+    const res = generateRowCopySql(config);
+    assertTrue(res.sql.includes('gen_random_uuid()'), 'UUID override generated');
+    assertTrue(res.sql.includes("username || '_CLONE'"), 'Username suffix concatenation generated');
+    assertTrue(res.sql.includes("'clone_' || email || '.org'"), 'Email prefix & suffix concatenation generated');
+    assertTrue(res.sql.includes("'DRAFT'"), 'Constant status generated');
+    assertTrue(res.sql.includes('0'), 'Constant numeric login_count generated');
+    assertTrue(res.sql.includes('CURRENT_TIMESTAMP'), 'Expression CURRENT_TIMESTAMP generated');
+    assertTrue(res.sql.includes('role'), 'Verbatim role column preserved');
+    assertTrue(res.sql.includes('RETURNING *;'), 'RETURNING clause included');
+    assertEqual(res.copySummary.overridden, 6, '6 columns overridden');
+    assertEqual(res.copySummary.copiedVerbatim, 1, '1 column copied verbatim (role)');
+  });
+
+  test('Database Row Copy Tool', 'Multi-Dialect Output (Postgres, MySQL, SQL Server)', () => {
+    const baseConfig = DB_ROW_COPY_PRESETS[3]; // products catalog item with SKU, title, unit_price
+
+    // 1. PostgreSQL dialect
+    const pgRes = generateRowCopySql({
+      ...baseConfig,
+      options: { ...baseConfig.options, dialect: 'postgres' },
+    });
+    assertTrue(pgRes.sql.includes("sku || '-V2'"), 'PostgreSQL uses || string concatenation');
+
+    // 2. MySQL dialect
+    const mysqlRes = generateRowCopySql({
+      ...baseConfig,
+      options: { ...baseConfig.options, dialect: 'mysql' },
+    });
+    assertTrue(mysqlRes.sql.includes("CONCAT(`sku`, '-V2')") || mysqlRes.sql.includes("CONCAT(sku, '-V2')"), 'MySQL uses CONCAT() string concatenation');
+
+    // 3. SQL Server dialect
+    const sqlServerRes = generateRowCopySql({
+      ...baseConfig,
+      options: { ...baseConfig.options, dialect: 'sqlserver', useTransaction: true },
+    });
+    assertTrue(sqlServerRes.sql.includes("[sku] + '-V2'") || sqlServerRes.sql.includes("sku + '-V2'"), 'SQL Server uses + string concatenation');
+    assertTrue(sqlServerRes.sql.includes('BEGIN TRANSACTION;'), 'SQL Server uses BEGIN TRANSACTION;');
+  });
+
+  test('Database Row Copy Tool', 'Live Row Simulation and Value Differencing', () => {
+    const preset = DB_ROW_COPY_PRESETS[1]; // user_accounts preset
+    const sampleSource = preset.sampleSourceRow!;
+
+    const { clonedRow, diffs } = simulateRowCopy(preset, sampleSource);
+
+    // Email has prefix 'clone_' and suffix '.sandbox'
+    assertEqual(clonedRow.email, 'clone_alice.smith@enterprise.com.sandbox', 'Simulated email prefix and suffix');
+    assertEqual(diffs.email.status, 'overridden', 'Email diff status is overridden');
+
+    // Full name has suffix ' (Staging Copy)'
+    assertEqual(clonedRow.full_name, 'Alice Smith (Staging Copy)', 'Simulated full_name suffix');
+
+    // Role is not in overrides -> copied verbatim
+    assertEqual(clonedRow.role, sampleSource.role, 'Role is copied verbatim');
+    assertEqual(diffs.role.status, 'identical', 'Role diff status is identical');
+
+    // is_active is constant 'false'
+    assertEqual(clonedRow.is_active, 'false', 'is_active set to false');
+  });
+
+  test('Database Row Copy Tool', 'JSON Configuration Import & Export Presets', () => {
+    const preset = DB_ROW_COPY_PRESETS[0];
+
+    // Serialization
+    const serialized = JSON.stringify(preset, null, 2);
+    assertTrue(serialized.includes('"tableName": "orders"'), 'Serialized JSON contains tableName');
+    assertTrue(serialized.includes('"lookupColumn": "order_id"'), 'Serialized JSON contains lookupColumn');
+
+    // Deserialization
+    const parsed: DbRowCopyConfig = JSON.parse(serialized);
+    assertEqual(parsed.tableName, preset.tableName, 'Deserialized tableName matches');
+    assertEqual(parsed.columns.length, preset.columns.length, 'Columns length matches');
+    assertEqual(parsed.lookupValue, preset.lookupValue, 'Lookup value matches');
+    assertEqual(Object.keys(parsed.overrides).length, Object.keys(preset.overrides).length, 'Overrides count matches');
   });
 
   const durationMs = Math.round((performance.now() - startTime) * 100) / 100;

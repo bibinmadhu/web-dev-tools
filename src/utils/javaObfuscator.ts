@@ -818,35 +818,101 @@ export function deobfuscateJavaCode(
 
   // 2. Deobfuscate REST controller paths
   const pathPairs: [string, string][] = [];
+
+  const addPathPair = (obf: string, orig: string) => {
+    if (!obf || !orig || obf === orig) return;
+    const trimmedObf = obf.trim();
+    const trimmedOrig = orig.trim();
+    if (!pathPairs.some(([o]) => o === trimmedObf)) {
+      pathPairs.push([trimmedObf, trimmedOrig]);
+    }
+  };
+
+  // Collect from mapping.paths
   if (mapping && typeof mapping === 'object' && 'paths' in mapping && mapping.paths) {
-    Object.entries(mapping.paths).forEach(([orig, obf]) => {
-      if (obf && orig && obf !== orig) {
-        pathPairs.push([obf, orig]);
+    Object.entries(mapping.paths).forEach(([k, v]) => {
+      if (k && v && typeof k === 'string' && typeof v === 'string') {
+        const kStr = k.trim();
+        const vStr = v.trim();
+        if (inputCode.includes(kStr) && !inputCode.includes(vStr)) {
+          addPathPair(kStr, vStr);
+        } else if (inputCode.includes(vStr) && !inputCode.includes(kStr)) {
+          addPathPair(vStr, kStr);
+        } else {
+          addPathPair(vStr, kStr);
+        }
       }
     });
   }
-  Object.entries(reverseMap).forEach(([obf, orig]) => {
-    if (obf && orig && obf !== orig) {
-      if (obf.startsWith('/') && orig.startsWith('/')) {
-        if (!pathPairs.some(([o]) => o === obf)) {
-          pathPairs.push([obf, orig]);
+
+  // Collect from reverseMapping
+  if (mapping && typeof mapping === 'object' && 'reverseMapping' in mapping && mapping.reverseMapping) {
+    Object.entries(mapping.reverseMapping).forEach(([obf, orig]) => {
+      if (typeof obf === 'string' && typeof orig === 'string') {
+        if (obf.includes('/') || orig.includes('/') || obf.startsWith('p_') || obf.startsWith('pth')) {
+          addPathPair(obf, orig);
         }
+      }
+    });
+  }
+
+  // Also collect from reverseMap
+  Object.entries(reverseMap).forEach(([obf, orig]) => {
+    if (typeof obf === 'string' && typeof orig === 'string') {
+      if (obf.includes('/') || orig.includes('/') || obf.startsWith('p_') || obf.startsWith('pth')) {
+        addPathPair(obf, orig);
       }
     }
   });
 
-  // Sort paths by length descending
+  // Synthesize composite paths (cross product of class level & method level paths)
+  const basePairs = [...pathPairs];
+  basePairs.forEach(([obf1, orig1]) => {
+    basePairs.forEach(([obf2, orig2]) => {
+      if (obf1 !== obf2 && obf1.startsWith('/') && obf2.startsWith('/')) {
+        const combinedObf = (obf1.endsWith('/') ? obf1.slice(0, -1) : obf1) + '/' + (obf2.startsWith('/') ? obf2.slice(1) : obf2);
+        const combinedOrig = (orig1.endsWith('/') ? orig1.slice(0, -1) : orig1) + '/' + (orig2.startsWith('/') ? orig2.slice(1) : orig2);
+        addPathPair(combinedObf, combinedOrig);
+      }
+    });
+  });
+
+  // Also extract individual segment pairs from path pairs
+  const segmentPairs: [string, string][] = [];
+  pathPairs.forEach(([obf, orig]) => {
+    const obfParts = obf.split('/').filter(Boolean);
+    const origParts = orig.split('/').filter(Boolean);
+    if (obfParts.length === origParts.length) {
+      obfParts.forEach((oPart, idx) => {
+        const rPart = origParts[idx];
+        if (oPart && rPart && oPart !== rPart && !oPart.startsWith('{') && !rPart.startsWith('{')) {
+          if (!segmentPairs.some(([o]) => o === oPart)) {
+            segmentPairs.push([oPart, rPart]);
+          }
+        }
+      });
+    }
+  });
+
+  // 2a. Replace full and composite paths (longest first)
   pathPairs.sort((a, b) => b[0].length - a[0].length);
   pathPairs.forEach(([obfPath, origPath]) => {
     // Replace exact path in double quotes, single quotes, backticks
     code = code.split(`"${obfPath}"`).join(`"${origPath}"`);
     code = code.split(`'${obfPath}'`).join(`'${origPath}'`);
     code = code.split(`\`${obfPath}\``).join(`\`${origPath}\``);
-    // Also replace in URLs, curl commands, and log lines where bounded by quotes, spaces, or delimiters
+    // Also replace in URLs, curl commands, and log lines where bounded by quotes, spaces, delimiters, or trailing slash
     const escaped = obfPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const startBoundary = '(?<=^|[\\s"\'`(\\[{=:,;>]|https?:\\/\\/[^/\\s]+)';
-    const endBoundary = '(?=$|[\\s"\'`)\\]},;?#<])';
+    const endBoundary = '(?=$|[\\s"\'`)\\]},;?#<\\/])';
     code = code.replace(new RegExp(startBoundary + escaped + endBoundary, 'g'), origPath);
+  });
+
+  // 2b. Replace path segments in path/URL contexts (e.g. /p_a/ or /p_a? or /p_a")
+  segmentPairs.sort((a, b) => b[0].length - a[0].length);
+  segmentPairs.forEach(([obfSeg, origSeg]) => {
+    const segEscaped = obfSeg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    code = code.replace(new RegExp(`(?<=\\/)${segEscaped}(?=[\\/\\s"'\`)\\]},;?#<]|$)`, 'g'), origSeg);
   });
 
   // 3. Filter out empty or self-referential keys for identifier tokens

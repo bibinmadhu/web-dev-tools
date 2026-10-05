@@ -1,0 +1,1109 @@
+// Database Row Copy Tool - Engine & SQL Generator
+// Supports table definitions, DDL parsing, custom lookup columns, column overrides, multi-dialect SQL & JSON import/export
+
+export type SqlDialect = 'postgres' | 'mysql' | 'sqlserver' | 'oracle' | 'sqlite';
+
+export type ColumnDataType =
+  | 'INTEGER'
+  | 'BIGINT'
+  | 'UUID'
+  | 'VARCHAR'
+  | 'TEXT'
+  | 'BOOLEAN'
+  | 'TIMESTAMP'
+  | 'TIMESTAMPTZ'
+  | 'DATE'
+  | 'NUMERIC'
+  | 'JSON'
+  | 'JSONB'
+  | 'SERIAL'
+  | 'OTHER';
+
+export type OverrideMode =
+  | 'constant'
+  | 'expression'
+  | 'prefix_suffix'
+  | 'sequence_increment'
+  | 'mock_random'
+  | 'null'
+  | 'exclude';
+
+export type RandomMockType =
+  | 'uuid'
+  | 'email'
+  | 'timestamp_now'
+  | 'timestamp_future'
+  | 'numeric_code'
+  | 'phone'
+  | 'name_copy';
+
+export interface TableColumn {
+  id: string;
+  name: string;
+  type: ColumnDataType;
+  isPrimaryKey: boolean;
+  isNullable: boolean;
+  isIdentity?: boolean;
+  defaultValue?: string;
+  comment?: string;
+}
+
+export interface ColumnOverride {
+  columnName: string;
+  mode: OverrideMode;
+  constantValue?: string;
+  expression?: string;
+  prefix?: string;
+  suffix?: string;
+  sequenceStep?: number;
+  randomType?: RandomMockType;
+  active: boolean;
+}
+
+export interface RowCopyOptions {
+  dialect: SqlDialect;
+  useTransaction: boolean;
+  rollbackOnly: boolean;
+  includeReturning: boolean;
+  returningColumns?: string; // e.g. '*' or 'id, created_at'
+  copyCount: number; // 1 to 10
+  strategy: 'insert_select' | 'cte_select';
+  generatePythonScript: boolean;
+  setIdentityInsert?: boolean; // SQL Server specific
+}
+
+export interface DbRowCopyConfig {
+  id: string;
+  name: string;
+  description?: string;
+  schemaName?: string;
+  tableName: string;
+  columns: TableColumn[];
+  lookupColumn: string;
+  lookupValue: string;
+  lookupOperator: '=' | 'IN' | 'LIKE';
+  overrides: Record<string, ColumnOverride>;
+  options: RowCopyOptions;
+  sampleSourceRow?: Record<string, any>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface GeneratedSqlResult {
+  sql: string;
+  pythonScript?: string;
+  copySummary: {
+    totalColumns: number;
+    copiedVerbatim: number;
+    overridden: number;
+    excluded: number;
+    insertedColumns: string[];
+    excludedColumns: string[];
+  };
+}
+
+export const COMMON_DATA_TYPES: { type: ColumnDataType; label: string; defaultSample: string }[] = [
+  { type: 'UUID', label: 'UUID (Globally Unique ID)', defaultSample: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' },
+  { type: 'BIGINT', label: 'BIGINT (64-bit Integer)', defaultSample: '10042' },
+  { type: 'INTEGER', label: 'INTEGER (32-bit Integer)', defaultSample: '42' },
+  { type: 'VARCHAR', label: 'VARCHAR / String', defaultSample: 'Active Member' },
+  { type: 'TEXT', label: 'TEXT (Long Text)', defaultSample: 'Customer account notes and history' },
+  { type: 'BOOLEAN', label: 'BOOLEAN (True / False)', defaultSample: 'true' },
+  { type: 'TIMESTAMP', label: 'TIMESTAMP', defaultSample: '2026-03-15 10:30:00' },
+  { type: 'TIMESTAMPTZ', label: 'TIMESTAMPTZ (with Timezone)', defaultSample: '2026-03-15 10:30:00+00' },
+  { type: 'DATE', label: 'DATE', defaultSample: '2026-03-15' },
+  { type: 'NUMERIC', label: 'NUMERIC / DECIMAL', defaultSample: '199.95' },
+  { type: 'JSONB', label: 'JSONB (Binary JSON)', defaultSample: '{"tier": "gold", "role": "admin"}' },
+  { type: 'JSON', label: 'JSON', defaultSample: '{"notifications": true}' },
+  { type: 'SERIAL', label: 'SERIAL (Auto-increment)', defaultSample: '1' },
+  { type: 'OTHER', label: 'OTHER / Custom Type', defaultSample: 'active' },
+];
+
+/**
+ * Checks if a data type requires SQL single quotes around literal values
+ */
+export function isTypeQuoted(type: ColumnDataType): boolean {
+  switch (type) {
+    case 'VARCHAR':
+    case 'TEXT':
+    case 'UUID':
+    case 'DATE':
+    case 'TIMESTAMP':
+    case 'TIMESTAMPTZ':
+    case 'JSON':
+    case 'JSONB':
+    case 'OTHER':
+      return true;
+    case 'INTEGER':
+    case 'BIGINT':
+    case 'NUMERIC':
+    case 'BOOLEAN':
+    case 'SERIAL':
+    default:
+      return false;
+  }
+}
+
+/**
+ * Formats a literal value safely for SQL based on data type and dialect
+ */
+export function formatSqlLiteral(value: string | undefined | null, type: ColumnDataType, dialect: SqlDialect = 'postgres'): string {
+  if (value === undefined || value === null || value === '') {
+    return 'NULL';
+  }
+  const trimmed = String(value).trim();
+  if (trimmed.toUpperCase() === 'NULL') {
+    return 'NULL';
+  }
+
+  // Boolean handling
+  if (type === 'BOOLEAN') {
+    const lower = trimmed.toLowerCase();
+    if (lower === 'true' || lower === '1' || lower === 't') {
+      return dialect === 'sqlserver' || dialect === 'oracle' ? '1' : 'TRUE';
+    }
+    return dialect === 'sqlserver' || dialect === 'oracle' ? '0' : 'FALSE';
+  }
+
+  // Numeric types: no quotes if valid number
+  if (type === 'INTEGER' || type === 'BIGINT' || type === 'NUMERIC' || type === 'SERIAL') {
+    if (!isNaN(Number(trimmed))) {
+      return trimmed;
+    }
+  }
+
+  // Escape single quotes by doubling them
+  const escaped = trimmed.replace(/'/g, "''");
+
+  if (type === 'JSON' || type === 'JSONB') {
+    if (dialect === 'postgres') {
+      return `'${escaped}'::${type.toLowerCase()}`;
+    }
+    return `'${escaped}'`;
+  }
+
+  return `'${escaped}'`;
+}
+
+/**
+ * Robust CREATE TABLE DDL parser for extracting table name, schema, columns, types and keys
+ */
+export function parseCreateTableDdl(ddl: string): {
+  tableName: string;
+  schemaName?: string;
+  columns: TableColumn[];
+} {
+  if (!ddl || !ddl.trim()) {
+    return { tableName: 'new_table', columns: [] };
+  }
+
+  const clean = ddl
+    .replace(/\/\*[\s\S]*?\*\//g, '') // remove multi-line comments
+    .replace(/--.*$/gm, '') // remove single-line comments
+    .trim();
+
+  // Extract table name e.g. CREATE TABLE [IF NOT EXISTS] [schema.]table_name (
+  const tableRegex = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:["`]?([a-zA-Z0-9_]+)["`]?\.)?["`]?([a-zA-Z0-9_]+)["`]?\s*\(([\s\S]+)\)/i;
+  const match = tableRegex.exec(clean);
+
+  if (!match) {
+    // Fallback: parse whatever line definitions exist
+    return {
+      tableName: 'custom_table',
+      columns: parseColumnLines(clean),
+    };
+  }
+
+  const schemaName = match[1] || undefined;
+  const tableName = match[2];
+  const body = match[3];
+
+  const columns = parseColumnDefinitionsBody(body);
+
+  return {
+    tableName,
+    schemaName,
+    columns: columns.length > 0 ? columns : [createDefaultIdColumn()],
+  };
+}
+
+/**
+ * Parses individual column definition lines inside CREATE TABLE (...)
+ */
+function parseColumnDefinitionsBody(bodyText: string): TableColumn[] {
+  const columns: TableColumn[] = [];
+  const primaryKeyCols = new Set<string>();
+
+  // Split by top-level commas (handling parentheses in types like VARCHAR(255) or NUMERIC(10,2))
+  const rawParts: string[] = [];
+  let depth = 0;
+  let current = '';
+
+  for (let i = 0; i < bodyText.length; i++) {
+    const char = bodyText[i];
+    if (char === '(') depth++;
+    else if (char === ')') depth--;
+
+    if (char === ',' && depth === 0) {
+      if (current.trim()) rawParts.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim()) rawParts.push(current.trim());
+
+  // First pass: detect standalone PRIMARY KEY (col1, col2) or CONSTRAINT ... PRIMARY KEY
+  rawParts.forEach((part) => {
+    const pkMatch = /PRIMARY\s+KEY\s*\(([^)]+)\)/i.exec(part);
+    if (pkMatch) {
+      pkMatch[1].split(',').forEach((c) => {
+        const cleanName = c.trim().replace(/["`]/g, '');
+        if (cleanName) primaryKeyCols.add(cleanName);
+      });
+    }
+  });
+
+  // Second pass: parse column lines
+  rawParts.forEach((part, idx) => {
+    const trimmed = part.trim();
+    if (
+      !trimmed ||
+      /^(?:CONSTRAINT|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK|KEY|INDEX)\b/i.test(trimmed)
+    ) {
+      return;
+    }
+
+    const colTokens = trimmed.match(/^["`]?([a-zA-Z0-9_]+)["`]?\s+([A-Za-z0-9_()]+)([\s\S]*)$/);
+    if (!colTokens) return;
+
+    const colName = colTokens[1];
+    const rawType = colTokens[2].toUpperCase();
+    const rest = colTokens[3] || '';
+
+    const type = mapRawTypeToColumnType(rawType);
+    const isPkInline = /PRIMARY\s+KEY/i.test(rest);
+    const isPk = isPkInline || primaryKeyCols.has(colName);
+    const isNullable = !/NOT\s+NULL/i.test(rest) && !isPk;
+    const isIdentity = /SERIAL|AUTO_INCREMENT|IDENTITY|GENERATED/i.test(rawType + ' ' + rest);
+
+    let defaultValue: string | undefined;
+    const defaultMatch = /DEFAULT\s+([^,)]+)/i.exec(rest);
+    if (defaultMatch) {
+      defaultValue = defaultMatch[1].trim();
+    }
+
+    columns.push({
+      id: `col_${idx}_${colName}`,
+      name: colName,
+      type,
+      isPrimaryKey: isPk,
+      isNullable,
+      isIdentity,
+      defaultValue,
+    });
+  });
+
+  return columns;
+}
+
+/**
+ * Fallback parser for lines of columns (e.g. pasted list of name type)
+ */
+function parseColumnLines(text: string): TableColumn[] {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  const cols: TableColumn[] = [];
+
+  lines.forEach((line, idx) => {
+    const clean = line.replace(/,/g, '').trim();
+    const parts = clean.split(/\s+/);
+    if (parts.length >= 1) {
+      const name = parts[0].replace(/["`]/g, '');
+      const rawType = (parts[1] || 'VARCHAR').toUpperCase();
+      const type = mapRawTypeToColumnType(rawType);
+      const isPk = /PRIMARY|PK|KEY|ID$/i.test(clean) || name.toLowerCase() === 'id';
+      cols.push({
+        id: `col_line_${idx}_${name}`,
+        name,
+        type,
+        isPrimaryKey: isPk,
+        isNullable: !isPk,
+        isIdentity: isPk && (type === 'INTEGER' || type === 'BIGINT' || type === 'SERIAL'),
+      });
+    }
+  });
+
+  return cols;
+}
+
+/**
+ * Maps raw SQL data type strings to standard ColumnDataType
+ */
+export function mapRawTypeToColumnType(raw: string): ColumnDataType {
+  const upper = raw.toUpperCase();
+  if (upper.includes('BIGINT') || upper.includes('INT8')) return 'BIGINT';
+  if (upper.includes('INT') || upper.includes('SMALLINT')) return 'INTEGER';
+  if (upper.includes('UUID')) return 'UUID';
+  if (upper.includes('SERIAL')) return 'SERIAL';
+  if (upper.includes('BOOL')) return 'BOOLEAN';
+  if (upper.includes('TIMESTAMPTZ')) return 'TIMESTAMPTZ';
+  if (upper.includes('TIMESTAMP') || upper.includes('DATETIME')) return 'TIMESTAMP';
+  if (upper.includes('DATE')) return 'DATE';
+  if (upper.includes('NUMERIC') || upper.includes('DECIMAL') || upper.includes('FLOAT') || upper.includes('DOUBLE') || upper.includes('REAL')) return 'NUMERIC';
+  if (upper.includes('JSONB')) return 'JSONB';
+  if (upper.includes('JSON')) return 'JSON';
+  if (upper.includes('TEXT') || upper.includes('CLOB')) return 'TEXT';
+  if (upper.includes('VARCHAR') || upper.includes('CHAR') || upper.includes('STRING')) return 'VARCHAR';
+  return 'VARCHAR';
+}
+
+export function createDefaultIdColumn(): TableColumn {
+  return {
+    id: 'col_id',
+    name: 'id',
+    type: 'UUID',
+    isPrimaryKey: true,
+    isNullable: false,
+    defaultValue: 'gen_random_uuid()',
+  };
+}
+
+/**
+ * Generates the expression for a given column based on its override rule and SQL dialect
+ */
+export function buildColumnSqlExpression(
+  col: TableColumn,
+  override: ColumnOverride | undefined,
+  dialect: SqlDialect
+): string | null {
+  // If not overridden or override not active, copy column verbatim
+  if (!override || !override.active) {
+    return escapeIdentifier(col.name, dialect);
+  }
+
+  switch (override.mode) {
+    case 'exclude':
+      // Return null to signal column should be completely excluded from INSERT list
+      return null;
+
+    case 'null':
+      return 'NULL';
+
+    case 'constant':
+      return formatSqlLiteral(override.constantValue, col.type, dialect);
+
+    case 'expression':
+      return override.expression?.trim() || 'DEFAULT';
+
+    case 'sequence_increment': {
+      const step = override.sequenceStep || 1;
+      return `${escapeIdentifier(col.name, dialect)} + ${step}`;
+    }
+
+    case 'prefix_suffix': {
+      const colIdent = escapeIdentifier(col.name, dialect);
+      const prefix = override.prefix || '';
+      const suffix = override.suffix || '';
+
+      if (dialect === 'mysql') {
+        const parts: string[] = [];
+        if (prefix) parts.push(`'${prefix.replace(/'/g, "''")}'`);
+        parts.push(colIdent);
+        if (suffix) parts.push(`'${suffix.replace(/'/g, "''")}'`);
+        return `CONCAT(${parts.join(', ')})`;
+      } else if (dialect === 'sqlserver') {
+        const parts: string[] = [];
+        if (prefix) parts.push(`'${prefix.replace(/'/g, "''")}'`);
+        parts.push(colIdent);
+        if (suffix) parts.push(`'${suffix.replace(/'/g, "''")}'`);
+        return parts.join(' + ');
+      } else {
+        // Postgres, Oracle, SQLite use standard string concatenation ||
+        const parts: string[] = [];
+        if (prefix) parts.push(`'${prefix.replace(/'/g, "''")}'`);
+        parts.push(colIdent);
+        if (suffix) parts.push(`'${suffix.replace(/'/g, "''")}'`);
+        return parts.join(' || ');
+      }
+    }
+
+    case 'mock_random':
+      return generateRandomSqlExpression(override.randomType || 'uuid', dialect, col);
+
+    default:
+      return escapeIdentifier(col.name, dialect);
+  }
+}
+
+/**
+ * Generates SQL dialect-specific expressions for random mock values
+ */
+function generateRandomSqlExpression(randomType: RandomMockType, dialect: SqlDialect, col: TableColumn): string {
+  switch (randomType) {
+    case 'uuid':
+      if (dialect === 'postgres') return 'gen_random_uuid()';
+      if (dialect === 'mysql') return 'UUID()';
+      if (dialect === 'sqlserver') return 'NEWID()';
+      if (dialect === 'oracle') return 'SYS_GUID()';
+      return 'lower(hex(randomblob(16)))'; // SQLite
+
+    case 'email':
+      if (dialect === 'postgres') {
+        return `'copy_' || SUBSTR(MD5(RANDOM()::text), 1, 6) || '@domain.internal'`;
+      } else if (dialect === 'mysql') {
+        return `CONCAT('copy_', SUBSTR(MD5(RAND()), 1, 6), '@domain.internal')`;
+      } else if (dialect === 'sqlserver') {
+        return `'copy_' + SUBSTRING(CONVERT(VARCHAR(36), NEWID()), 1, 6) + '@domain.internal'`;
+      } else {
+        return `'copy_' || SUBSTR(HEX(RANDOMBLOB(4)), 1, 6) || '@domain.internal'`;
+      }
+
+    case 'timestamp_now':
+      if (dialect === 'postgres') return 'CURRENT_TIMESTAMP';
+      if (dialect === 'mysql') return 'NOW()';
+      if (dialect === 'sqlserver') return 'GETDATE()';
+      if (dialect === 'oracle') return 'SYSTIMESTAMP';
+      return "datetime('now')";
+
+    case 'timestamp_future':
+      if (dialect === 'postgres') return "CURRENT_TIMESTAMP + INTERVAL '30 days'";
+      if (dialect === 'mysql') return 'DATE_ADD(NOW(), INTERVAL 30 DAY)';
+      if (dialect === 'sqlserver') return 'DATEADD(day, 30, GETDATE())';
+      if (dialect === 'oracle') return 'SYSTIMESTAMP + 30';
+      return "datetime('now', '+30 days')";
+
+    case 'numeric_code':
+      if (dialect === 'postgres') return 'FLOOR(100000 + RANDOM() * 900000)::integer';
+      if (dialect === 'mysql') return 'FLOOR(100000 + (RAND() * 900000))';
+      if (dialect === 'sqlserver') return 'FLOOR(100000 + (RAND(CHECKSUM(NEWID())) * 900000))';
+      return 'ABS(RANDOM()) % 900000 + 100000';
+
+    case 'name_copy':
+      if (dialect === 'mysql') {
+        return `CONCAT(${col.name}, ' (Clone)')`;
+      } else if (dialect === 'sqlserver') {
+        return `${col.name} + ' (Clone)'`;
+      }
+      return `${col.name} || ' (Clone)'`;
+
+    default:
+      return 'DEFAULT';
+  }
+}
+
+/**
+ * Escapes SQL identifiers per dialect
+ */
+export function escapeIdentifier(ident: string, dialect: SqlDialect): string {
+  if (!ident) return '';
+  switch (dialect) {
+    case 'postgres':
+    case 'sqlite':
+    case 'oracle':
+      return ident.includes(' ') || ident.toLowerCase() !== ident ? `"${ident}"` : ident;
+    case 'mysql':
+      return `\`${ident}\``;
+    case 'sqlserver':
+      return `[${ident}]`;
+    default:
+      return ident;
+  }
+}
+
+/**
+ * Formats full table name with optional schema
+ */
+export function formatFullTableName(tableName: string, schemaName?: string, dialect: SqlDialect = 'postgres'): string {
+  const cleanTable = tableName.trim();
+  const cleanSchema = schemaName?.trim();
+  if (cleanSchema) {
+    return `${escapeIdentifier(cleanSchema, dialect)}.${escapeIdentifier(cleanTable, dialect)}`;
+  }
+  return escapeIdentifier(cleanTable, dialect);
+}
+
+/**
+ * Core SQL Generation logic for Database Row Copy Tool
+ */
+export function generateRowCopySql(config: DbRowCopyConfig): GeneratedSqlResult {
+  const {
+    tableName,
+    schemaName,
+    columns,
+    lookupColumn,
+    lookupValue,
+    lookupOperator,
+    overrides,
+    options,
+  } = config;
+
+  const dialect = options.dialect || 'postgres';
+  const fullTable = formatFullTableName(tableName, schemaName, dialect);
+
+  // Determine which column is used for lookup
+  const effectiveLookupCol = columns.find((c) => c.name === lookupColumn) || columns.find((c) => c.isPrimaryKey) || columns[0] || {
+    name: 'id',
+    type: 'INTEGER',
+    isPrimaryKey: true,
+    isNullable: false,
+  };
+
+  // Build WHERE condition
+  let whereClause = '';
+  const lookupIdent = escapeIdentifier(effectiveLookupCol.name, dialect);
+  const rawLookupVal = lookupValue.trim();
+
+  if (lookupOperator === 'IN' || rawLookupVal.includes(',') || rawLookupVal.includes('\n')) {
+    const vals = rawLookupVal
+      .split(/[\r\n,]+/)
+      .map((v) => v.trim())
+      .filter(Boolean)
+      .map((v) => formatSqlLiteral(v, effectiveLookupCol.type, dialect));
+
+    whereClause = `${lookupIdent} IN (${vals.length > 0 ? vals.join(', ') : 'NULL'})`;
+  } else if (lookupOperator === 'LIKE') {
+    whereClause = `${lookupIdent} LIKE '%${rawLookupVal.replace(/'/g, "''")}%'`;
+  } else {
+    // Default =
+    whereClause = `${lookupIdent} = ${formatSqlLiteral(rawLookupVal, effectiveLookupCol.type, dialect)}`;
+  }
+
+  // Determine active columns and expressions for INSERT
+  const insertCols: string[] = [];
+  const selectExprs: string[] = [];
+  const excludedCols: string[] = [];
+  let verbatimCount = 0;
+  let overriddenCount = 0;
+
+  columns.forEach((col) => {
+    const override = overrides[col.name];
+    const expr = buildColumnSqlExpression(col, override, dialect);
+
+    if (expr === null) {
+      excludedCols.push(col.name);
+    } else {
+      insertCols.push(escapeIdentifier(col.name, dialect));
+      selectExprs.push(expr);
+      if (override && override.active && override.mode !== 'exclude') {
+        overriddenCount++;
+      } else {
+        verbatimCount++;
+      }
+    }
+  });
+
+  const lines: string[] = [];
+
+  // Transaction start
+  if (options.useTransaction) {
+    if (dialect === 'sqlserver') {
+      lines.push('BEGIN TRANSACTION;');
+    } else {
+      lines.push('BEGIN;');
+    }
+    lines.push('');
+  }
+
+  // SQL Server IDENTITY_INSERT ON
+  if (dialect === 'sqlserver' && options.setIdentityInsert && columns.some((c) => c.isIdentity || c.isPrimaryKey)) {
+    lines.push(`SET IDENTITY_INSERT ${fullTable} ON;`);
+    lines.push('');
+  }
+
+  // Comments & description
+  lines.push(`-- ==============================================================================`);
+  lines.push(`-- Database Row Copy Script`);
+  lines.push(`-- Table: ${schemaName ? `${schemaName}.${tableName}` : tableName}`);
+  lines.push(`-- Source Lookup: ${effectiveLookupCol.name} (${whereClause})`);
+  lines.push(`-- Copied Columns: ${insertCols.length} | Overridden: ${overriddenCount} | Excluded: ${excludedCols.length}`);
+  lines.push(`-- Generated: ${new Date().toISOString()}`);
+  lines.push(`-- ==============================================================================`);
+  lines.push('');
+
+  // Main Query
+  if (options.strategy === 'cte_select') {
+    lines.push(`WITH source_row AS (`);
+    lines.push(`    SELECT *`);
+    lines.push(`    FROM ${fullTable}`);
+    lines.push(`    WHERE ${whereClause}`);
+    lines.push(`)`);
+    lines.push(`INSERT INTO ${fullTable} (`);
+    lines.push(`    ${insertCols.join(',\n    ')}`);
+    lines.push(`)`);
+    lines.push(`SELECT`);
+    lines.push(`    ${selectExprs.join(',\n    ')}`);
+    lines.push(`FROM source_row;`);
+  } else {
+    // Standard INSERT INTO ... SELECT
+    lines.push(`INSERT INTO ${fullTable} (`);
+    lines.push(`    ${insertCols.join(',\n    ')}`);
+    lines.push(`)`);
+    lines.push(`SELECT`);
+    lines.push(`    ${selectExprs.join(',\n    ')}`);
+    lines.push(`FROM ${fullTable}`);
+    lines.push(`WHERE ${whereClause}`);
+
+    // Multiple copy count expansion (cross join dummy series if requested > 1)
+    if (options.copyCount > 1) {
+      if (dialect === 'postgres') {
+        lines.push(`CROSS JOIN generate_series(1, ${options.copyCount}) AS copy_multiplier`);
+      } else if (dialect === 'mysql') {
+        const dummyUnion = Array.from({ length: options.copyCount }, (_, i) => `SELECT ${i + 1} AS n`).join(' UNION ALL ');
+        lines.push(`CROSS JOIN (${dummyUnion}) AS copy_multiplier`);
+      }
+    }
+
+    // RETURNING Clause
+    if (options.includeReturning) {
+      const retCols = options.returningColumns?.trim() || '*';
+      if (dialect === 'postgres' || dialect === 'sqlite') {
+        lines.push(`RETURNING ${retCols};`);
+      } else if (dialect === 'sqlserver') {
+        // SQL Server uses OUTPUT inserted.* placed before SELECT or via CTE
+        lines[lines.length - 1] += ';';
+      } else {
+        lines[lines.length - 1] += ';';
+      }
+    } else {
+      lines[lines.length - 1] += ';';
+    }
+  }
+
+  // SQL Server IDENTITY_INSERT OFF
+  if (dialect === 'sqlserver' && options.setIdentityInsert && columns.some((c) => c.isIdentity || c.isPrimaryKey)) {
+    lines.push('');
+    lines.push(`SET IDENTITY_INSERT ${fullTable} OFF;`);
+  }
+
+  // Transaction termination
+  if (options.useTransaction) {
+    lines.push('');
+    if (options.rollbackOnly) {
+      lines.push('-- Dry-run verification mode (no changes persisted)');
+      lines.push('ROLLBACK;');
+    } else {
+      lines.push('COMMIT;');
+    }
+  }
+
+  const generatedSql = lines.join('\n');
+
+  // Generate Python integration script if requested
+  let pythonScript: string | undefined;
+  if (options.generatePythonScript) {
+    pythonScript = buildPythonTestScript(config, whereClause, effectiveLookupCol.name, generatedSql);
+  }
+
+  return {
+    sql: generatedSql,
+    pythonScript,
+    copySummary: {
+      totalColumns: columns.length,
+      copiedVerbatim: verbatimCount,
+      overridden: overriddenCount,
+      excluded: excludedCols.length,
+      insertedColumns: insertCols,
+      excludedColumns: excludedCols,
+    },
+  };
+}
+
+/**
+ * Builds automated Python integration test script
+ */
+function buildPythonTestScript(
+  config: DbRowCopyConfig,
+  whereClause: string,
+  lookupCol: string,
+  copySql: string
+): string {
+  const { tableName, schemaName, options, lookupValue } = config;
+  const dialect = options.dialect || 'postgres';
+
+  if (dialect === 'mysql') {
+    return `# Python MySQL Integration Script - Row Copy Verification
+import mysql.connector
+
+def copy_database_row():
+    connection = mysql.connector.connect(
+        host="localhost",
+        user="root",
+        password="your_password",
+        database="your_database"
+    )
+    cursor = connection.cursor(dictionary=True)
+    try:
+        # Check source row exists
+        cursor.execute("SELECT * FROM ${tableName} WHERE ${lookupCol} = %s", ("${lookupValue}",))
+        source = cursor.fetchone()
+        if not source:
+            print("[WARN] Source row not found for ${lookupCol} = ${lookupValue}")
+            return
+
+        print(f"[OK] Source row found: {source}")
+
+        # Execute clone SQL
+        copy_sql = """
+${copySql}
+        """
+        cursor.execute(copy_sql)
+        connection.commit()
+        print(f"[SUCCESS] Cloned row inserted successfully. New ID: {cursor.lastrowid}")
+    finally:
+        cursor.close()
+        connection.close()
+
+if __name__ == "__main__":
+    copy_database_row()
+`;
+  }
+
+  // Default: PostgreSQL with pg8000
+  return `# Python PostgreSQL Integration Script (pg8000) - Row Copy Verification
+import pg8000.native
+
+def clone_database_row():
+    # Connect to PostgreSQL instance
+    con = pg8000.native.Connection(
+        user="postgres",
+        password="password",
+        host="localhost",
+        port=5432,
+        database="postgres"
+    )
+
+    try:
+        # 1. Verify source row exists
+        check_query = "SELECT * FROM ${schemaName ? `${schemaName}.${tableName}` : tableName} WHERE ${lookupCol} = :lookup_val"
+        rows = con.run(check_query, lookup_val="${lookupValue}")
+        if not rows:
+            print("[ERROR] Source row not found for lookup: ${lookupCol} = '${lookupValue}'")
+            return
+
+        print(f"[INFO] Verified source row exists with {len(rows[0])} columns.")
+
+        # 2. Execute duplicate row insertion
+        clone_query = """
+${copySql}
+        """
+        con.run(clone_query)
+        print("[SUCCESS] Database row copied and overrides applied successfully.")
+    except Exception as e:
+        print(f"[FAILURE] Error executing row copy: {e}")
+        raise
+    finally:
+        con.close()
+
+if __name__ == "__main__":
+    clone_database_row()
+`;
+}
+
+/**
+ * Simulates the copied row data side-by-side with original row data for preview
+ */
+export function simulateRowCopy(
+  config: DbRowCopyConfig,
+  sourceRow: Record<string, any>
+): {
+  clonedRow: Record<string, any>;
+  diffs: Record<string, { original: any; copied: any; status: 'identical' | 'overridden' | 'excluded' }>;
+} {
+  const clonedRow: Record<string, any> = {};
+  const diffs: Record<string, { original: any; copied: any; status: 'identical' | 'overridden' | 'excluded' }> = {};
+
+  config.columns.forEach((col) => {
+    const origVal = sourceRow[col.name];
+    const override = config.overrides[col.name];
+
+    if (!override || !override.active) {
+      // Verbatim
+      clonedRow[col.name] = origVal !== undefined ? origVal : (col.defaultValue || `sample_${col.name}`);
+      diffs[col.name] = {
+        original: origVal,
+        copied: clonedRow[col.name],
+        status: 'identical',
+      };
+      return;
+    }
+
+    switch (override.mode) {
+      case 'exclude':
+        diffs[col.name] = {
+          original: origVal,
+          copied: '<EXCLUDED / DB DEFAULT>',
+          status: 'excluded',
+        };
+        break;
+
+      case 'null':
+        clonedRow[col.name] = null;
+        diffs[col.name] = {
+          original: origVal,
+          copied: null,
+          status: 'overridden',
+        };
+        break;
+
+      case 'constant':
+        clonedRow[col.name] = override.constantValue;
+        diffs[col.name] = {
+          original: origVal,
+          copied: override.constantValue,
+          status: 'overridden',
+        };
+        break;
+
+      case 'expression':
+        clonedRow[col.name] = override.expression || 'EXPR()';
+        diffs[col.name] = {
+          original: origVal,
+          copied: override.expression || 'EXPR()',
+          status: 'overridden',
+        };
+        break;
+
+      case 'prefix_suffix': {
+        const base = origVal !== undefined ? String(origVal) : 'sample';
+        const newVal = `${override.prefix || ''}${base}${override.suffix || ''}`;
+        clonedRow[col.name] = newVal;
+        diffs[col.name] = {
+          original: origVal,
+          copied: newVal,
+          status: 'overridden',
+        };
+        break;
+      }
+
+      case 'sequence_increment': {
+        const num = Number(origVal || 1);
+        const step = override.sequenceStep || 1;
+        const newVal = !isNaN(num) ? num + step : (origVal || 0) + 1;
+        clonedRow[col.name] = newVal;
+        diffs[col.name] = {
+          original: origVal,
+          copied: newVal,
+          status: 'overridden',
+        };
+        break;
+      }
+
+      case 'mock_random':
+        if (override.randomType === 'uuid') {
+          clonedRow[col.name] = 'c9a1b2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d';
+        } else if (override.randomType === 'email') {
+          clonedRow[col.name] = 'copy_sample89@domain.internal';
+        } else if (override.randomType === 'timestamp_now') {
+          clonedRow[col.name] = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        } else if (override.randomType === 'numeric_code') {
+          clonedRow[col.name] = 849201;
+        } else {
+          clonedRow[col.name] = `${origVal || 'Sample'} (Clone)`;
+        }
+        diffs[col.name] = {
+          original: origVal,
+          copied: clonedRow[col.name],
+          status: 'overridden',
+        };
+        break;
+
+      default:
+        clonedRow[col.name] = origVal;
+        diffs[col.name] = {
+          original: origVal,
+          copied: origVal,
+          status: 'identical',
+        };
+    }
+  });
+
+  return { clonedRow, diffs };
+}
+
+/**
+ * Built-in Presets for Rapid Testing and Production Scenarios
+ */
+export const DB_ROW_COPY_PRESETS: DbRowCopyConfig[] = [
+  {
+    id: 'preset_ecommerce_orders',
+    name: 'E-commerce Order & Customer Clone',
+    description: 'Clone existing customer orders with new order_number, reset status to PENDING, and fresh timestamp',
+    tableName: 'orders',
+    schemaName: 'public',
+    columns: [
+      { id: 'c1', name: 'order_id', type: 'UUID', isPrimaryKey: true, isNullable: false, defaultValue: 'gen_random_uuid()' },
+      { id: 'c2', name: 'customer_id', type: 'BIGINT', isPrimaryKey: false, isNullable: false },
+      { id: 'c3', name: 'order_code', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+      { id: 'c4', name: 'total_amount', type: 'NUMERIC', isPrimaryKey: false, isNullable: false },
+      { id: 'c5', name: 'status', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+      { id: 'c6', name: 'currency', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+      { id: 'c7', name: 'notes', type: 'TEXT', isPrimaryKey: false, isNullable: true },
+      { id: 'c8', name: 'created_at', type: 'TIMESTAMPTZ', isPrimaryKey: false, isNullable: false, defaultValue: 'NOW()' },
+    ],
+    lookupColumn: 'order_id',
+    lookupValue: 'e89b21f3-4a11-477c-a0e2-76bf38d99042',
+    lookupOperator: '=',
+    overrides: {
+      order_id: { columnName: 'order_id', mode: 'mock_random', randomType: 'uuid', active: true },
+      order_code: { columnName: 'order_code', mode: 'prefix_suffix', prefix: 'COPY-', suffix: '-TEST', active: true },
+      status: { columnName: 'status', mode: 'constant', constantValue: 'PENDING_APPROVAL', active: true },
+      created_at: { columnName: 'created_at', mode: 'expression', expression: 'CURRENT_TIMESTAMP', active: true },
+      notes: { columnName: 'notes', mode: 'prefix_suffix', prefix: '[CLONED FOR QA] ', active: true },
+    },
+    options: {
+      dialect: 'postgres',
+      useTransaction: true,
+      rollbackOnly: false,
+      includeReturning: true,
+      returningColumns: '*',
+      copyCount: 1,
+      strategy: 'insert_select',
+      generatePythonScript: true,
+    },
+    sampleSourceRow: {
+      order_id: 'e89b21f3-4a11-477c-a0e2-76bf38d99042',
+      customer_id: '99482',
+      order_code: 'ORD-2026-9041',
+      total_amount: '349.50',
+      status: 'DELIVERED',
+      currency: 'USD',
+      notes: 'Standard priority delivery requested',
+      created_at: '2026-02-10 14:22:00+00',
+    },
+  },
+  {
+    id: 'preset_user_accounts',
+    name: 'User Account & Security Profile Clone',
+    description: 'Clone a user profile by email or user_id with modified email, new UUID, and DRAFT verification status',
+    tableName: 'user_accounts',
+    schemaName: 'auth',
+    columns: [
+      { id: 'u1', name: 'id', type: 'UUID', isPrimaryKey: true, isNullable: false, defaultValue: 'gen_random_uuid()' },
+      { id: 'u2', name: 'email', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+      { id: 'u3', name: 'full_name', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+      { id: 'u4', name: 'role', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+      { id: 'u5', name: 'is_active', type: 'BOOLEAN', isPrimaryKey: false, isNullable: false },
+      { id: 'u6', name: 'preferences', type: 'JSONB', isPrimaryKey: false, isNullable: true },
+      { id: 'u7', name: 'created_at', type: 'TIMESTAMP', isPrimaryKey: false, isNullable: false },
+      { id: 'u8', name: 'updated_at', type: 'TIMESTAMP', isPrimaryKey: false, isNullable: false },
+    ],
+    lookupColumn: 'email',
+    lookupValue: 'alice.smith@enterprise.com',
+    lookupOperator: '=',
+    overrides: {
+      id: { columnName: 'id', mode: 'mock_random', randomType: 'uuid', active: true },
+      email: { columnName: 'email', mode: 'prefix_suffix', prefix: 'clone_', suffix: '.sandbox', active: true },
+      full_name: { columnName: 'full_name', mode: 'prefix_suffix', suffix: ' (Staging Copy)', active: true },
+      is_active: { columnName: 'is_active', mode: 'constant', constantValue: 'false', active: true },
+      created_at: { columnName: 'created_at', mode: 'expression', expression: 'NOW()', active: true },
+      updated_at: { columnName: 'updated_at', mode: 'expression', expression: 'NOW()', active: true },
+    },
+    options: {
+      dialect: 'postgres',
+      useTransaction: true,
+      rollbackOnly: false,
+      includeReturning: true,
+      returningColumns: 'id, email, full_name, role, is_active, created_at',
+      copyCount: 1,
+      strategy: 'insert_select',
+      generatePythonScript: true,
+    },
+    sampleSourceRow: {
+      id: '9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d',
+      email: 'alice.smith@enterprise.com',
+      full_name: 'Alice Smith',
+      role: 'SUPER_ADMIN',
+      is_active: true,
+      preferences: '{"theme": "dark", "locale": "en_US"}',
+      created_at: '2025-11-20 09:15:00',
+      updated_at: '2026-01-05 18:40:00',
+    },
+  },
+  {
+    id: 'preset_saas_subscriptions',
+    name: 'SaaS Subscription Plan & Quota Clone',
+    description: 'Clone a subscription tier with auto-increment ID excluded for serial generation, reset renewal date',
+    tableName: 'subscriptions',
+    schemaName: 'billing',
+    columns: [
+      { id: 's1', name: 'id', type: 'BIGINT', isPrimaryKey: true, isNullable: false, isIdentity: true },
+      { id: 's2', name: 'tenant_id', type: 'UUID', isPrimaryKey: false, isNullable: false },
+      { id: 's3', name: 'plan_code', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+      { id: 's4', name: 'billing_cycle', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+      { id: 's5', name: 'seat_count', type: 'INTEGER', isPrimaryKey: false, isNullable: false },
+      { id: 's6', name: 'is_trial', type: 'BOOLEAN', isPrimaryKey: false, isNullable: false },
+      { id: 's7', name: 'expires_at', type: 'TIMESTAMPTZ', isPrimaryKey: false, isNullable: false },
+    ],
+    lookupColumn: 'id',
+    lookupValue: '5012',
+    lookupOperator: '=',
+    overrides: {
+      id: { columnName: 'id', mode: 'exclude', active: true }, // Let auto-increment serial generate fresh ID
+      plan_code: { columnName: 'plan_code', mode: 'prefix_suffix', suffix: '_TEST_TRIAL', active: true },
+      is_trial: { columnName: 'is_trial', mode: 'constant', constantValue: 'true', active: true },
+      expires_at: { columnName: 'expires_at', mode: 'mock_random', randomType: 'timestamp_future', active: true },
+    },
+    options: {
+      dialect: 'postgres',
+      useTransaction: true,
+      rollbackOnly: false,
+      includeReturning: true,
+      returningColumns: '*',
+      copyCount: 1,
+      strategy: 'insert_select',
+      generatePythonScript: false,
+    },
+    sampleSourceRow: {
+      id: 5012,
+      tenant_id: '44e82500-e29b-41d4-a716-446655440000',
+      plan_code: 'ENTERPRISE_YEARLY',
+      billing_cycle: 'ANNUAL',
+      seat_count: 50,
+      is_trial: false,
+      expires_at: '2026-12-31 23:59:59+00',
+    },
+  },
+  {
+    id: 'preset_product_catalog',
+    name: 'Product Catalog Item & SKU Clone',
+    description: 'Duplicate product inventory items with new unique SKU, updated title, and inventory stock reset to 0',
+    tableName: 'products',
+    schemaName: 'catalog',
+    columns: [
+      { id: 'p1', name: 'sku', type: 'VARCHAR', isPrimaryKey: true, isNullable: false },
+      { id: 'p2', name: 'title', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+      { id: 'p3', name: 'category_id', type: 'INTEGER', isPrimaryKey: false, isNullable: false },
+      { id: 'p4', name: 'unit_price', type: 'NUMERIC', isPrimaryKey: false, isNullable: false },
+      { id: 'p5', name: 'stock_quantity', type: 'INTEGER', isPrimaryKey: false, isNullable: false },
+      { id: 'p6', name: 'is_published', type: 'BOOLEAN', isPrimaryKey: false, isNullable: false },
+      { id: 'p7', name: 'description', type: 'TEXT', isPrimaryKey: false, isNullable: true },
+    ],
+    lookupColumn: 'sku',
+    lookupValue: 'PROD-AUDIO-9901',
+    lookupOperator: '=',
+    overrides: {
+      sku: { columnName: 'sku', mode: 'prefix_suffix', suffix: '-V2', active: true },
+      title: { columnName: 'title', mode: 'prefix_suffix', suffix: ' (Model 2026)', active: true },
+      stock_quantity: { columnName: 'stock_quantity', mode: 'constant', constantValue: '0', active: true },
+      is_published: { columnName: 'is_published', mode: 'constant', constantValue: 'false', active: true },
+    },
+    options: {
+      dialect: 'mysql',
+      useTransaction: false,
+      rollbackOnly: false,
+      includeReturning: false,
+      copyCount: 1,
+      strategy: 'insert_select',
+      generatePythonScript: true,
+    },
+    sampleSourceRow: {
+      sku: 'PROD-AUDIO-9901',
+      title: 'Wireless Noise-Cancelling Headphones',
+      category_id: 12,
+      unit_price: '249.99',
+      stock_quantity: 120,
+      is_published: true,
+      description: 'Flagship bluetooth headphone with 40h battery life and active noise suppression.',
+    },
+  },
+];

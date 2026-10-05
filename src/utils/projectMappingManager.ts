@@ -29,11 +29,12 @@ export interface MappingParseStats {
   methodsCount: number;
   variablesCount: number;
   packagesCount: number;
+  pathsCount: number;
   totalCount: number;
 }
 
 export interface MappingConflictItem {
-  category: 'class' | 'method' | 'variable' | 'package';
+  category: 'class' | 'method' | 'variable' | 'package' | 'path';
   identifier: string;
   currentObfuscated: string;
   importedObfuscated: string;
@@ -68,6 +69,7 @@ export function createEmptyMapping(): JavaObfuscationMapping {
     variables: {},
     methods: {},
     packages: {},
+    paths: {},
     reverseMapping: {},
   };
 }
@@ -81,6 +83,7 @@ export function cloneMapping(mapping: JavaObfuscationMapping): JavaObfuscationMa
     variables: { ...mapping.variables },
     methods: { ...mapping.methods },
     packages: { ...mapping.packages },
+    paths: { ...(mapping.paths || {}) },
     reverseMapping: { ...mapping.reverseMapping },
   };
 }
@@ -102,6 +105,11 @@ export function rebuildReverseMapping(mapping: JavaObfuscationMapping): void {
   for (const [orig, obf] of Object.entries(mapping.packages)) {
     if (obf) mapping.reverseMapping[obf] = orig;
   }
+  if (mapping.paths) {
+    for (const [orig, obf] of Object.entries(mapping.paths)) {
+      if (obf) mapping.reverseMapping[obf] = orig;
+    }
+  }
 }
 
 /**
@@ -112,12 +120,14 @@ export function computeMappingStats(mapping: JavaObfuscationMapping): MappingPar
   const methodsCount = Object.keys(mapping.methods || {}).length;
   const variablesCount = Object.keys(mapping.variables || {}).length;
   const packagesCount = Object.keys(mapping.packages || {}).length;
+  const pathsCount = Object.keys(mapping.paths || {}).length;
   return {
     classesCount,
     methodsCount,
     variablesCount,
     packagesCount,
-    totalCount: classesCount + methodsCount + variablesCount + packagesCount,
+    pathsCount,
+    totalCount: classesCount + methodsCount + variablesCount + packagesCount + pathsCount,
   };
 }
 
@@ -131,7 +141,7 @@ export function detectMappingConflicts(
   const conflicts: MappingConflictItem[] = [];
 
   const checkCategory = (
-    cat: 'class' | 'method' | 'variable' | 'package',
+    cat: 'class' | 'method' | 'variable' | 'package' | 'path',
     currMap: Record<string, string>,
     inMap: Record<string, string>
   ) => {
@@ -152,6 +162,7 @@ export function detectMappingConflicts(
   checkCategory('method', current.methods, incoming.methods);
   checkCategory('variable', current.variables, incoming.variables);
   checkCategory('package', current.packages, incoming.packages);
+  checkCategory('path', current.paths || {}, incoming.paths || {});
 
   return conflicts;
 }
@@ -194,6 +205,8 @@ export function mergeProjectMappings(
   mergeCategory(merged.methods, incoming.methods);
   mergeCategory(merged.variables, incoming.variables);
   mergeCategory(merged.packages, incoming.packages);
+  if (!merged.paths) merged.paths = {};
+  mergeCategory(merged.paths, incoming.paths || {});
 
   rebuildReverseMapping(merged);
 
@@ -364,6 +377,7 @@ export function parseAndNormalizeMapping(rawInput: string | any): MappingParseRe
         methods: { ...(inner.methods || {}) },
         variables: { ...(inner.variables || {}) },
         packages: { ...(inner.packages || {}) },
+        paths: { ...(inner.paths || {}) },
         reverseMapping: { ...(inner.reverseMapping || {}) },
       };
       rebuildReverseMapping(normalized);
@@ -377,18 +391,20 @@ export function parseAndNormalizeMapping(rawInput: string | any): MappingParseRe
       };
     }
 
-    // B. Standard JavaObfuscationMapping: has classes / methods / variables / packages keys
+    // B. Standard JavaObfuscationMapping: has classes / methods / variables / packages / paths keys
     if (
       'classes' in rawInput ||
       'methods' in rawInput ||
       'variables' in rawInput ||
-      'packages' in rawInput
+      'packages' in rawInput ||
+      'paths' in rawInput
     ) {
       const normalized: JavaObfuscationMapping = {
         classes: { ...(rawInput.classes || {}) },
         methods: { ...(rawInput.methods || {}) },
         variables: { ...(rawInput.variables || {}) },
         packages: { ...(rawInput.packages || {}) },
+        paths: { ...(rawInput.paths || {}) },
         reverseMapping: { ...(rawInput.reverseMapping || {}) },
       };
       rebuildReverseMapping(normalized);

@@ -392,4 +392,14 @@ export const TOOLS_DATA: DevTool[] = [
     iconType: 'table',
     isPopular: true,
   },
+  {
+    id: 'db-row-copy',
+    name: 'Database Row Copy Tool',
+    description: 'Duplicate & clone database rows by ID or custom lookup column with selective column overrides, multi-dialect SQL generation (PostgreSQL, MySQL, SQL Server, Oracle, SQLite) & JSON configuration import/export',
+    category: 'testing',
+    tags: ['Testing', 'Database', 'Row Copy', 'SQL', 'PostgreSQL', 'MySQL', 'Duplicate Row', 'Data Clone', 'Override', 'Import/Export'],
+    iconText: 'COPY',
+    iconType: 'database',
+    isPopular: true,
+  },
 ];

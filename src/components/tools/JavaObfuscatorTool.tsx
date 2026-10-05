@@ -46,6 +46,7 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
   const [sourceCode, setSourceCode] = useState<string>(JAVA_PRESETS[0].code);
   const [obfuscatedCode, setObfuscatedCode] = useState<string>('');
   const [deobfuscatedCode, setDeobfuscatedCode] = useState<string>('');
+  const [deobfInputCode, setDeobfInputCode] = useState<string>('');
 
   // Mapping state
   const [mapping, setMapping] = useState<JavaObfuscationMapping>({
@@ -116,17 +117,18 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
   }, [sourceCode, options, mode]);
 
   // Execute De-obfuscation
-  const handleRunDeobfuscation = () => {
+  const handleRunDeobfuscation = (overrideCode?: string, overrideMapping?: JavaObfuscationMapping) => {
     try {
-      let mapToUse = mapping;
-      if (mappingJsonInput.trim()) {
+      const codeToDeobf = overrideCode !== undefined ? overrideCode : (deobfInputCode || obfuscatedCode || sourceCode);
+      let mapToUse = overrideMapping || mapping;
+      if (mappingJsonInput.trim() && !overrideMapping) {
         try {
           mapToUse = JSON.parse(mappingJsonInput);
         } catch (e) {
           // fallback to current mapping state
         }
       }
-      const restored = deobfuscateJavaCode(sourceCode, mapToUse);
+      const restored = deobfuscateJavaCode(codeToDeobf, mapToUse);
       setDeobfuscatedCode(restored);
     } catch (err) {
       setDeobfuscatedCode('// Error during de-obfuscation: Check mapping JSON format');
@@ -137,17 +139,24 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
     if (mode === 'deobfuscate') {
       handleRunDeobfuscation();
     }
-  }, [sourceCode, mappingJsonInput, mode]);
+  }, [deobfInputCode, mappingJsonInput, mode]);
 
   // Preset Selection
   const handleSelectPreset = (preset: JavaPreset) => {
-    setSourceCode(preset.code);
-    if (preset.sampleMapping) {
-      setMappingJsonInput(JSON.stringify(preset.sampleMapping, null, 2));
-    }
     if (preset.category === 'stacktrace') {
+      setDeobfInputCode(preset.code);
+      if (preset.sampleMapping) {
+        const sampleMap = preset.sampleMapping as any;
+        setMapping(sampleMap);
+        setMappingJsonInput(JSON.stringify(preset.sampleMapping, null, 2));
+        handleRunDeobfuscation(preset.code, sampleMap);
+      }
       setMode('deobfuscate');
     } else {
+      setSourceCode(preset.code);
+      if (preset.sampleMapping) {
+        setMappingJsonInput(JSON.stringify(preset.sampleMapping, null, 2));
+      }
       setMode('obfuscate');
     }
   };
@@ -332,8 +341,12 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
 
           <button
             onClick={() => {
+              if (!deobfInputCode.trim()) {
+                const codeToUse = obfuscatedCode || sourceCode;
+                setDeobfInputCode(codeToUse);
+                handleRunDeobfuscation(codeToUse);
+              }
               setMode('deobfuscate');
-              handleRunDeobfuscation();
             }}
             className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               mode === 'deobfuscate'
@@ -497,15 +510,30 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
               <div className="flex flex-col bg-[#0F172A] border border-slate-800 rounded-xl overflow-hidden">
                 <div className="flex items-center justify-between px-4 py-2.5 bg-slate-900/80 border-b border-slate-800 text-xs font-mono">
                   <span className="text-slate-300 font-semibold flex items-center gap-2">
-                    <FileCode className="w-4 h-4 text-amber-400" /> Obfuscated Code / Stack Trace
+                    <FileCode className="w-4 h-4 text-amber-400" /> Obfuscated Code / Stack Trace / REST URLs
                   </span>
+                  <div className="flex items-center gap-2">
+                    {obfuscatedCode && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeobfInputCode(obfuscatedCode);
+                          handleRunDeobfuscation(obfuscatedCode);
+                        }}
+                        className="px-2.5 py-1 rounded text-[11px] font-medium bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 border border-indigo-500/40 transition-colors flex items-center gap-1"
+                        title="Load latest obfuscated code output from Obfuscator tab"
+                      >
+                        <RotateCcw className="w-3 h-3" /> Load Obfuscated Output
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <textarea
-                  value={sourceCode}
+                  value={deobfInputCode}
                   onChange={(e) => {
-                    setSourceCode(e.target.value);
+                    setDeobfInputCode(e.target.value);
                   }}
-                  placeholder="Paste obfuscated Java code or stack trace here..."
+                  placeholder="Paste obfuscated Java code, REST endpoints, curl commands, or stack trace here..."
                   rows={10}
                   className="w-full bg-[#0B0F1A] p-4 text-slate-200 font-mono text-xs focus:outline-none resize-y leading-relaxed"
                   spellCheck={false}
@@ -516,6 +544,11 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
                 <div className="flex items-center justify-between px-4 py-2.5 bg-slate-900/80 border-b border-slate-800 text-xs font-mono">
                   <span className="text-indigo-300 font-semibold flex items-center gap-2">
                     <FileJson className="w-4 h-4 text-indigo-400" /> Mapping Dictionary JSON
+                    {mapping.paths && Object.keys(mapping.paths).length > 0 && (
+                      <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                        {Object.keys(mapping.paths).length} REST paths
+                      </span>
+                    )}
                   </span>
                   <label className="cursor-pointer text-indigo-400 hover:text-indigo-300 flex items-center gap-1 text-[11px]">
                     <Upload className="w-3.5 h-3.5" /> Import JSON
@@ -533,7 +566,7 @@ export const JavaObfuscatorTool: React.FC<JavaObfuscatorToolProps> = ({
               </div>
 
               <button
-                onClick={handleRunDeobfuscation}
+                onClick={() => handleRunDeobfuscation()}
                 className="w-full py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors flex items-center justify-center gap-2 shadow-md"
               >
                 <RotateCcw className="w-4 h-4" /> Run De-obfuscation

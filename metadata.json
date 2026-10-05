@@ -1,6 +1,6 @@
 {
   "name": "DevHub - Developer Utilities Platform",
-  "description": "A comprehensive developer tool suite featuring Database Insert Query Generator (Project Rules & column mappings, DDL schema parsing, bulk UPSERT), CSV Auto Populator (header-based row autopopulation, column rules, editable data grid), JSON Editor (tree/code dual editor, deep search & replace, queries), and developer productivity tools.",
+  "description": "A comprehensive developer tool suite featuring Database Row Copy Tool (duplicate rows with ID or custom column lookup, selective column overrides, multi-dialect SQL, live diff simulation & JSON config export/import), Database Insert Query Generator, CSV Auto Populator, JSON Editor, and developer utilities.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
