@@ -91,6 +91,7 @@ export const RowLookupSelector: React.FC<RowLookupSelectorProps> = ({
               {columns.map((col) => (
                 <option key={col.id} value={col.name}>
                   {col.name} ({col.type}){col.isPrimaryKey ? ' ★ PK' : ''}
+                  {col.isIdentity ? ` ⚡ ${col.identityDefinition || 'Identity'}` : ''}
                 </option>
               ))}
             </select>

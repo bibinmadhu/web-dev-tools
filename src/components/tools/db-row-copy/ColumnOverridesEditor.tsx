@@ -140,6 +140,28 @@ export const ColumnOverridesEditor: React.FC<ColumnOverridesEditorProps> = ({
         <div className="flex flex-wrap items-center gap-1.5">
           <button
             type="button"
+            onClick={() => {
+              const next = { ...overrides };
+              columns.forEach((col) => {
+                if (col.isIdentity || (col.identityType && col.identityType !== 'none') || col.isPrimaryKey) {
+                  next[col.name] = {
+                    columnName: col.name,
+                    mode: 'exclude',
+                    active: true,
+                  };
+                }
+              });
+              onBatchApplyOverrides(next);
+            }}
+            className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg text-emerald-700 dark:text-emerald-300 bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-500/10 dark:hover:bg-emerald-500/20 border border-emerald-200 dark:border-emerald-500/30 transition-colors"
+            title="Auto-exclude identity/PK columns so the database sequence generates fresh IDs"
+          >
+            <Zap className="w-3 h-3 text-emerald-500" />
+            <span>Auto-Gen IDs</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleExcludePrimaryKey}
             className="flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-lg text-slate-700 dark:text-slate-200 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 transition-colors"
             title="Exclude primary key so the database auto-increments or generates default"
@@ -277,6 +299,12 @@ export const ColumnOverridesEditor: React.FC<ColumnOverridesEditorProps> = ({
                       Primary Key
                     </span>
                   )}
+                  {(col.isIdentity || (col.identityType && col.identityType !== 'none')) && (
+                    <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-200 dark:border-emerald-500/20 flex items-center gap-1">
+                      <Zap className="w-2.5 h-2.5 text-emerald-500" />
+                      {col.identityDefinition || 'Auto-Gen Identity'}
+                    </span>
+                  )}
                 </div>
 
                 <div>
@@ -291,6 +319,10 @@ export const ColumnOverridesEditor: React.FC<ColumnOverridesEditorProps> = ({
                       {override.mode === 'exclude'
                         ? 'Omitted from INSERT (Auto Default)'
                         : `Override: ${override.mode}`}
+                    </span>
+                  ) : col.isIdentity || (col.identityType && col.identityType !== 'none') ? (
+                    <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-500/20">
+                      ⚡ Auto-Omitted (DB Identity Sequence)
                     </span>
                   ) : (
                     <span className="text-[11px] font-medium text-slate-400 dark:text-slate-500">

@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Edit2,
   FileSpreadsheet,
+  Zap,
 } from 'lucide-react';
 import {
   DbRowCopyConfig,
@@ -116,6 +117,11 @@ export const RowDiffPreviewGrid: React.FC<RowDiffPreviewGridProps> = ({
                       {col.isPrimaryKey && (
                         <span className="text-[10px] text-amber-500" title="Primary Key">★</span>
                       )}
+                      {(col.isIdentity || (col.identityType && col.identityType !== 'none')) && (
+                        <span className="text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-1 py-0.2 rounded" title="Auto-Generated Identity">
+                          ⚡
+                        </span>
+                      )}
                       {isLookup && (
                         <span className="text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-1 rounded">
                           lookup
@@ -151,9 +157,16 @@ export const RowDiffPreviewGrid: React.FC<RowDiffPreviewGridProps> = ({
                   {/* Copied Value */}
                   <td className="py-2 px-3">
                     {isExcluded ? (
-                      <span className="text-amber-600 dark:text-amber-400 text-[11px] italic font-sans font-medium">
-                        Omitted (Auto Default)
-                      </span>
+                      col.isIdentity || (col.identityType && col.identityType !== 'none') ? (
+                        <span className="text-emerald-600 dark:text-emerald-400 text-[11px] font-sans font-medium flex items-center gap-1">
+                          <Zap className="w-3 h-3" />
+                          <span>Auto-Generated (Next Sequence ID)</span>
+                        </span>
+                      ) : (
+                        <span className="text-amber-600 dark:text-amber-400 text-[11px] italic font-sans font-medium">
+                          Omitted (Auto Default)
+                        </span>
+                      )
                     ) : isOverridden ? (
                       <span className="font-bold text-indigo-600 dark:text-indigo-400 truncate block max-w-xs" title={String(diff?.copied)}>
                         {diff?.copied !== null ? String(diff?.copied) : 'NULL'}
@@ -168,9 +181,15 @@ export const RowDiffPreviewGrid: React.FC<RowDiffPreviewGridProps> = ({
                   {/* Status / Rule */}
                   <td className="py-2 px-3 text-right">
                     {isExcluded ? (
-                      <span className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10 px-1.5 py-0.5 rounded">
-                        Excluded
-                      </span>
+                      col.isIdentity || (col.identityType && col.identityType !== 'none') ? (
+                        <span className="text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-1.5 py-0.5 rounded font-sans font-medium">
+                          ⚡ Auto-Gen
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10 px-1.5 py-0.5 rounded">
+                          Excluded
+                        </span>
+                      )
                     ) : isOverridden ? (
                       <span className="text-[10px] text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 px-1.5 py-0.5 rounded font-sans">
                         {config.overrides[col.name]?.mode}

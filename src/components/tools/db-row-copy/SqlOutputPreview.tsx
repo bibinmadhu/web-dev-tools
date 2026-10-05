@@ -164,7 +164,7 @@ export const SqlOutputPreview: React.FC<SqlOutputPreviewProps> = ({
       </div>
 
       {/* SQL Execution Options & Dialect Selector */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-3 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 text-xs">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 p-3 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 text-xs">
         {/* Dialect */}
         <div>
           <label className="block text-slate-500 dark:text-slate-400 mb-1 font-medium">
@@ -195,6 +195,25 @@ export const SqlOutputPreview: React.FC<SqlOutputPreviewProps> = ({
           >
             <option value="insert_select">INSERT INTO ... SELECT</option>
             <option value="cte_select">CTE (WITH source_row AS ...)</option>
+          </select>
+        </div>
+
+        {/* Auto-Gen ID Mode */}
+        <div>
+          <label className="block text-slate-500 dark:text-slate-400 mb-1 font-medium flex items-center gap-1">
+            <Zap className="w-3 h-3 text-amber-500" />
+            <span>Auto-Gen ID Mode</span>
+          </label>
+          <select
+            value={options.identityStrategy || 'auto_exclude'}
+            onChange={(e) => onUpdateOptions({ identityStrategy: e.target.value as any })}
+            className="w-full px-2.5 py-1 text-xs rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 font-medium font-mono"
+          >
+            <option value="auto_exclude">⚡ Omit ID (Sequence / Auto-Inc)</option>
+            <option value="overriding_system_value">OVERRIDING SYSTEM VALUE</option>
+            <option value="overriding_user_value">OVERRIDING USER VALUE</option>
+            <option value="custom_override">Custom Value Override</option>
+            <option value="include_verbatim">Copy Verbatim</option>
           </select>
         </div>
 
@@ -255,6 +274,16 @@ export const SqlOutputPreview: React.FC<SqlOutputPreviewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Auto-Gen ID Informational Banner */}
+      {copySummary.autoIdentityColumns && copySummary.autoIdentityColumns.length > 0 && (
+        <div className="flex items-center gap-2.5 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 text-xs text-emerald-800 dark:text-emerald-300">
+          <Zap className="w-4 h-4 text-emerald-500 shrink-0" />
+          <span>
+            <strong>Auto-Generated Identity Handled:</strong> Column <code>{copySummary.autoIdentityColumns.join(', ')}</code> is omitted from the INSERT projection so {options.dialect.toUpperCase()} automatically executes its identity sequence / counter to generate the next unique ID.
+          </span>
+        </div>
+      )}
 
       {/* Code Editor Box */}
       <div className="relative rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden bg-slate-950 font-mono text-xs">
