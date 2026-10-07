@@ -1,5 +1,15 @@
 import './polyfills';
 import {
+  generatePostgresDeleteQuery,
+  parseCreateTableDdl as parseDeleteCreateTableDdl,
+  parseDelimitedList,
+  createDbDeleteConfigExport,
+  validateAndParseDbDeleteConfig,
+  DB_DELETE_PRESETS,
+  DeleteQueryOptions,
+  DbDeleteConfigExport,
+} from './dbDeleteQueryGenerator';
+import {
   generatePostgresUpdateQuery,
   formatPostgresValue,
   parseCsvOrTsv,
@@ -5565,6 +5575,290 @@ CREATE TABLE "size_test" (
       Object.keys(config.sharedProperties || {}).length,
       'Shared properties count preserved across export/import'
     );
+  });
+
+  // =========================================================================
+  // Database Delete Query Generator Test Suite
+  // =========================================================================
+  test('Database Delete Query Generator', 'CREATE TABLE DDL Schema Parser for Delete Tool', () => {
+    const ddl = `CREATE TABLE public.customer_orders (
+      order_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      customer_id VARCHAR(64) NOT NULL,
+      tenant_id VARCHAR(32) NOT NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+      total_amount NUMERIC(12,2) NOT NULL,
+      notes TEXT,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );`;
+
+    const parsed = parseDeleteCreateTableDdl(ddl);
+    assertEqual(parsed.tableName, 'customer_orders', 'Parsed table name');
+    assertEqual(parsed.schema, 'public', 'Parsed schema name');
+    assertTrue(parsed.columns.length >= 6, 'Parsed at least 6 columns');
+
+    const orderIdCol = parsed.columns.find((c) => c.name === 'order_id');
+    assertTrue(Boolean(orderIdCol), 'Found order_id column');
+    assertEqual(orderIdCol?.type, 'uuid', 'order_id mapped to uuid type');
+    assertTrue(orderIdCol?.isPrimaryKey === true, 'order_id is primary key');
+
+    const amountCol = parsed.columns.find((c) => c.name === 'total_amount');
+    assertEqual(amountCol?.type, 'numeric', 'total_amount mapped to numeric type');
+  });
+
+  test('Database Delete Query Generator', 'Delimited and Spreadsheet List Parsing', () => {
+    const rawSpreadsheetInput = `ORD-001\tORD-002\n'ORD-003', "ORD-004"\nORD-001\n`;
+    const parsed = parseDelimitedList(rawSpreadsheetInput, true);
+
+    assertEqual(parsed.length, 4, 'Parsed 4 unique items (deduplicated)');
+    assertEqual(parsed[0], 'ORD-001', 'First item ORD-001');
+    assertEqual(parsed[1], 'ORD-002', 'Tab separated item ORD-002');
+    assertEqual(parsed[2], 'ORD-003', 'Stripped quotes ORD-003');
+    assertEqual(parsed[3], 'ORD-004', 'Stripped quotes ORD-004');
+  });
+
+  test('Database Delete Query Generator', 'Single and List Conditions with Multiple Operators', () => {
+    const options: DeleteQueryOptions = {
+      tableName: 'orders',
+      schema: 'public',
+      strategy: 'where_in',
+      transactionMode: 'none',
+      conditionLogic: 'AND',
+      allowFullTableDelete: false,
+      conditions: [
+        {
+          id: 'c1',
+          column: 'status',
+          type: 'text',
+          mode: 'single',
+          operator: '=',
+          singleValue: 'CANCELLED',
+          values: [],
+        },
+        {
+          id: 'c2',
+          column: 'order_id',
+          type: 'text',
+          mode: 'list',
+          operator: 'IN',
+          singleValue: '',
+          values: ['ORD-1', 'ORD-2'],
+        },
+        {
+          id: 'c3',
+          column: 'notes',
+          type: 'text',
+          mode: 'single',
+          operator: 'IS NULL',
+          singleValue: '',
+          values: [],
+        },
+      ],
+    };
+
+    const res = generatePostgresDeleteQuery(options);
+    assertTrue(res.sql.includes("status = 'CANCELLED'"), 'Includes status single condition');
+    assertTrue(res.sql.includes("order_id IN ('ORD-1', 'ORD-2')"), 'Includes order_id list condition');
+    assertTrue(res.sql.includes('notes IS NULL'), 'Includes notes IS NULL condition');
+    assertTrue(res.sql.includes('AND'), 'Combines with AND logic');
+    assertEqual(res.singleConditionsCount, 2, '2 single conditions');
+    assertEqual(res.listConditionsCount, 1, '1 list condition');
+  });
+
+  test('Database Delete Query Generator', 'Delete Strategy: High-Performance USING (VALUES) Join', () => {
+    const options: DeleteQueryOptions = {
+      tableName: 'user_tokens',
+      schema: 'auth',
+      strategy: 'using_values',
+      transactionMode: 'commit',
+      conditionLogic: 'AND',
+      returningClause: 'token_id',
+      includeTypeCasts: true,
+      conditions: [
+        {
+          id: 'c1',
+          column: 'token_id',
+          type: 'uuid',
+          mode: 'list',
+          operator: 'IN',
+          singleValue: '',
+          values: ['a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', 'b1ffcd88-8d1c-4fe9-aa5e-5cc8ac291b22'],
+        },
+        {
+          id: 'c2',
+          column: 'tenant_id',
+          type: 'text',
+          mode: 'single',
+          operator: '=',
+          singleValue: 'org-acme',
+          values: [],
+        },
+      ],
+    };
+
+    const res = generatePostgresDeleteQuery(options);
+    assertTrue(res.sql.includes('DELETE FROM auth.user_tokens'), 'Targets auth.user_tokens');
+    assertTrue(res.sql.includes('USING ('), 'Contains USING clause');
+    assertTrue(res.sql.includes('VALUES'), 'Contains VALUES list');
+    assertTrue(res.sql.includes('::uuid'), 'Includes type casts');
+    assertTrue(res.sql.includes('auth.user_tokens.token_id = v.target_val'), 'Joins on target column');
+    assertTrue(res.sql.includes('RETURNING token_id;'), 'Includes returning clause');
+    assertTrue(res.sql.includes('BEGIN;'), 'Includes BEGIN');
+    assertTrue(res.sql.includes('COMMIT;'), 'Includes COMMIT');
+  });
+
+  test('Database Delete Query Generator', 'Delete Strategy: Soft Delete (UPDATE instead of DELETE)', () => {
+    const options: DeleteQueryOptions = {
+      tableName: 'users',
+      strategy: 'soft_delete',
+      transactionMode: 'none',
+      conditionLogic: 'AND',
+      returningClause: 'id, is_deleted, deleted_at',
+      softDeleteSettings: {
+        enabled: true,
+        deletedAtColumn: 'deleted_at',
+        isDeletedColumn: 'is_deleted',
+        deletedByColumn: 'deleted_by',
+        deletedByValue: 'batch-cleanup-agent',
+      },
+      conditions: [
+        {
+          id: 'c1',
+          column: 'id',
+          type: 'integer',
+          mode: 'single',
+          operator: '=',
+          singleValue: '42',
+          values: [],
+        },
+      ],
+    };
+
+    const res = generatePostgresDeleteQuery(options);
+    assertTrue(res.sql.includes('UPDATE users'), 'Uses UPDATE syntax instead of hard DELETE');
+    assertTrue(res.sql.includes('deleted_at = NOW()'), 'Sets deleted_at = NOW()');
+    assertTrue(res.sql.includes('is_deleted = TRUE'), 'Sets is_deleted = TRUE');
+    assertTrue(res.sql.includes("deleted_by = 'batch-cleanup-agent'"), 'Sets deleted_by tracking column');
+    assertTrue(res.sql.includes('WHERE'), 'Contains WHERE clause');
+    assertTrue(res.sql.includes('RETURNING id, is_deleted, deleted_at;'), 'Includes RETURNING');
+  });
+
+  test('Database Delete Query Generator', 'Delete Strategy: CTE With Targets & Chunked Limit', () => {
+    // 1. CTE strategy
+    const cteOptions: DeleteQueryOptions = {
+      tableName: 'logs',
+      strategy: 'cte',
+      transactionMode: 'none',
+      conditionLogic: 'AND',
+      conditions: [
+        {
+          id: 'c1',
+          column: 'log_id',
+          type: 'bigint',
+          mode: 'list',
+          operator: 'IN',
+          singleValue: '',
+          values: ['1001', '1002'],
+        },
+      ],
+    };
+    const cteRes = generatePostgresDeleteQuery(cteOptions);
+    assertTrue(cteRes.sql.includes('WITH targets(log_id) AS ('), 'Generates WITH targets CTE');
+    assertTrue(cteRes.sql.includes('DELETE FROM logs'), 'Deletes from logs');
+    assertTrue(cteRes.sql.includes('IN (SELECT log_id FROM targets)'), 'Filters by CTE targets');
+
+    // 2. Chunked Limit strategy
+    const chunkedOptions: DeleteQueryOptions = {
+      tableName: 'audit_events',
+      strategy: 'chunked_limit',
+      chunkLimit: 500,
+      transactionMode: 'none',
+      conditionLogic: 'AND',
+      conditions: [
+        {
+          id: 'c1',
+          column: 'severity',
+          type: 'text',
+          mode: 'single',
+          operator: '=',
+          singleValue: 'DEBUG',
+          values: [],
+        },
+      ],
+    };
+    const chunkedRes = generatePostgresDeleteQuery(chunkedOptions);
+    assertTrue(chunkedRes.sql.includes('LIMIT 500'), 'Uses LIMIT 500 in chunked CTE');
+    assertTrue(chunkedRes.sql.includes('ctid IN (SELECT ctid FROM to_delete)'), 'Uses ctid based safe deletion');
+  });
+
+  test('Database Delete Query Generator', 'Safety Guard: Blocks Full Table Delete without Conditions', () => {
+    const unsafeOptions: DeleteQueryOptions = {
+      tableName: 'critical_data',
+      strategy: 'where_in',
+      transactionMode: 'none',
+      conditionLogic: 'AND',
+      allowFullTableDelete: false, // Guard is active
+      conditions: [],
+    };
+
+    const res = generatePostgresDeleteQuery(unsafeOptions);
+    assertEqual(res.safetyRiskLevel, 'CRITICAL', 'Marks safety risk level as CRITICAL');
+    assertTrue(res.warnings.length > 0, 'Includes critical warning');
+    assertTrue(res.warnings[0].includes('No WHERE conditions defined'), 'Warning specifies missing conditions');
+    assertTrue(res.sql.includes('WHERE 1 = 0'), 'Inserts safety 1 = 0 to prevent accidental execution');
+  });
+
+  test('Database Delete Query Generator', 'Transaction Control, Dry-Run Simulation & Python Script', () => {
+    const options: DeleteQueryOptions = {
+      tableName: 'sessions',
+      strategy: 'where_in',
+      transactionMode: 'rollback', // Dry run mode!
+      conditionLogic: 'AND',
+      includeCountCheck: true,
+      conditions: [
+        {
+          id: 'c1',
+          column: 'is_active',
+          type: 'boolean',
+          mode: 'single',
+          operator: '=',
+          singleValue: 'false',
+          values: [],
+        },
+      ],
+    };
+
+    const res = generatePostgresDeleteQuery(options);
+    assertTrue(res.sql.includes('BEGIN;'), 'Includes BEGIN');
+    assertTrue(res.sql.includes('ROLLBACK;'), 'Includes ROLLBACK in dry-run mode');
+    assertTrue(res.sql.includes('SELECT COUNT(*)'), 'Includes pre-delete count check');
+
+    // Dry run select query validation
+    assertTrue(res.dryRunSelectSql.includes('SELECT * FROM sessions'), 'Generates matching SELECT preview query');
+    assertTrue(res.dryRunSelectSql.includes('is_active = FALSE'), 'Applies matching boolean filter');
+
+    // Python script validation
+    assertTrue(res.pythonSnippet.includes('import pg8000.native'), 'Python script imports pg8000.native');
+    assertTrue(res.pythonSnippet.includes('ROLLBACK'), 'Python script includes dry-run rollback');
+  });
+
+  test('Database Delete Query Generator', 'Configuration Export & Import Roundtrip', () => {
+    const preset = DB_DELETE_PRESETS[0];
+    const exportData = createDbDeleteConfigExport(preset.options, [], {
+      name: 'Test Export',
+      description: 'Test export description',
+    });
+
+    assertEqual(exportData.tool, 'db-delete-query-generator', 'Tool identifier is db-delete-query-generator');
+    assertEqual(exportData.version, '1.0.0', 'Version is 1.0.0');
+
+    const jsonString = JSON.stringify(exportData, null, 2);
+    const parsed = validateAndParseDbDeleteConfig(jsonString);
+
+    assertTrue(parsed.isValid, 'Successfully validates and parses JSON config');
+    assertTrue(Boolean(parsed.config), 'Parsed config is present');
+    assertEqual(parsed.config?.tableName, preset.options.tableName, 'Table name preserved');
+    assertEqual(parsed.config?.strategy, preset.options.strategy, 'Strategy preserved');
+    assertEqual(parsed.config?.conditions.length, preset.options.conditions.length, 'Conditions count preserved');
   });
 
   const durationMs = Math.round((performance.now() - startTime) * 100) / 100;

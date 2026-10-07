@@ -402,4 +402,14 @@ export const TOOLS_DATA: DevTool[] = [
     iconType: 'database',
     isPopular: true,
   },
+  {
+    id: 'db-delete-query-generator',
+    name: 'Database Delete Query Generator',
+    description: 'Generate bulk and targeted PostgreSQL DELETE queries from table schemas (CREATE TABLE DDL or columns) with single & list criteria, USING VALUES join, WHERE IN, soft delete, dry-run previews & JSON config import/export',
+    category: 'testing',
+    tags: ['Testing', 'Database', 'PostgreSQL', 'SQL', 'Delete', 'Bulk Delete', 'Schema Parser', 'Query Generator', 'Conditions', 'Import/Export', 'Soft Delete'],
+    iconText: 'DEL',
+    iconType: 'database',
+    isPopular: true,
+  },
 ];

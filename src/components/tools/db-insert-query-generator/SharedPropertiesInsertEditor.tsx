@@ -225,8 +225,11 @@ export const SharedPropertiesInsertEditor: React.FC<SharedPropertiesInsertEditor
   // Bulk enable / disable
   const handleToggleAll = (active: boolean) => {
     const updated: Record<string, InsertSharedPropertyRule> = {};
-    Object.entries(sharedProperties).forEach(([key, rule]) => {
-      updated[key] = { ...rule, active };
+    Object.entries(sharedProperties).forEach(([key, val]) => {
+      const rule = val as InsertSharedPropertyRule;
+      if (rule) {
+        updated[key] = { ...rule, active };
+      }
     });
     onBatchUpdateSharedProperties(updated);
     setSyncNotice(active ? 'Activated all shared rules.' : 'Deactivated all shared rules.');
@@ -237,8 +240,9 @@ export const SharedPropertiesInsertEditor: React.FC<SharedPropertiesInsertEditor
   const handleClearInactive = () => {
     const updated: Record<string, InsertSharedPropertyRule> = {};
     let removed = 0;
-    Object.entries(sharedProperties).forEach(([key, rule]) => {
-      if (rule.active) {
+    Object.entries(sharedProperties).forEach(([key, val]) => {
+      const rule = val as InsertSharedPropertyRule;
+      if (rule && rule.active) {
         updated[key] = rule;
       } else {
         removed++;

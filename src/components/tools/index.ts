@@ -37,4 +37,5 @@ export * from './db-insert-query-generator/DbInsertQueryGeneratorTool';
 export * from './json-editor/JsonEditorTool';
 export * from './csv-auto-populator/CsvAutoPopulatorTool';
 export * from './DbRowCopyTool';
+export * from './db-delete-query-generator/DbDeleteQueryGeneratorTool';
 export * from './GenericTool';

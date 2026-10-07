@@ -193,7 +193,9 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
   }, [options]);
 
   const activeSharedCount = useMemo(() => {
-    return Object.values(options.sharedProperties || {}).filter((r) => Boolean(r && r.active)).length;
+    return Object.values(options.sharedProperties || {}).filter(
+      (r) => Boolean(r && (r as InsertSharedPropertyRule).active)
+    ).length;
   }, [options.sharedProperties]);
 
   const handleUpdateSharedProperty = (key: string, rule: Partial<InsertSharedPropertyRule> | null) => {
