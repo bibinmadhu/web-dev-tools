@@ -55,6 +55,8 @@ import {
   parsePreferredValuesInput,
   generateCreateTableDdl,
   generateColumnValue,
+  InsertSharedPropertyRule,
+  findMatchingInsertSharedProperty,
 } from '../../../utils/dbInsertQueryGenerator';
 import {
   DbProjectRule,
@@ -66,6 +68,7 @@ import { DbInsertConfigModal } from './DbInsertConfigModal';
 import { PreferredValuesModal } from './PreferredValuesModal';
 import { ExportDdlModal } from './ExportDdlModal';
 import { ProjectRulesModal } from './ProjectRulesModal';
+import { SharedPropertiesInsertEditor } from './SharedPropertiesInsertEditor';
 
 interface DbInsertQueryGeneratorToolProps {
   isFullScreen?: boolean;
@@ -78,7 +81,7 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
   isFullScreen = false,
   onToggleFullScreen,
 }) => {
-  const [activeTab, setActiveTab] = useState<'columns' | 'options' | 'presets'>('columns');
+  const [activeTab, setActiveTab] = useState<'columns' | 'shared' | 'options' | 'presets'>('columns');
 
   // Core configuration options
   const [options, setOptions] = useState<InsertQueryOptions>(() => {
@@ -188,6 +191,105 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
   const queryResult = useMemo(() => {
     return generatePostgresInsertQuery(options);
   }, [options]);
+
+  const activeSharedCount = useMemo(() => {
+    return Object.values(options.sharedProperties || {}).filter((r) => Boolean(r && r.active)).length;
+  }, [options.sharedProperties]);
+
+  const handleUpdateSharedProperty = (key: string, rule: Partial<InsertSharedPropertyRule> | null) => {
+    setOptions((prev) => {
+      const nextShared = { ...(prev.sharedProperties || {}) };
+      if (!rule) {
+        delete nextShared[key];
+      } else {
+        nextShared[key] = {
+          ...(nextShared[key] || {
+            id: `sp_${key}_${Date.now()}`,
+            columnName: key,
+            mode: 'constant',
+            active: true,
+            isCustom: true,
+            matchCaseInsensitive: true,
+          }),
+          ...rule,
+        };
+      }
+      return {
+        ...prev,
+        sharedProperties: nextShared,
+      };
+    });
+  };
+
+  const handleBatchUpdateSharedProperties = (rules: Record<string, InsertSharedPropertyRule>) => {
+    setOptions((prev) => ({
+      ...prev,
+      sharedProperties: rules,
+    }));
+  };
+
+  const handleToggleApplySharedProperties = (apply: boolean) => {
+    setOptions((prev) => ({
+      ...prev,
+      applySharedProperties: apply,
+    }));
+  };
+
+  const handleApplySharedToColumns = () => {
+    setOptions((prev) => {
+      const shared = prev.sharedProperties || {};
+      let updatedCount = 0;
+      const updatedCols = prev.columns.map((col) => {
+        const match = findMatchingInsertSharedProperty(col.name, shared, true);
+        if (match && match.active) {
+          updatedCount++;
+          if (match.mode === 'constant') {
+            return {
+              ...col,
+              valueMode: 'fixed' as ValueGenerationMode,
+              fixedValue: match.constantValue || '',
+            };
+          } else if (match.mode === 'expression') {
+            return {
+              ...col,
+              valueMode: 'fixed' as ValueGenerationMode,
+              fixedValue: match.expression || 'CURRENT_TIMESTAMP',
+            };
+          } else if (match.mode === 'pool' && match.valuePool && match.valuePool.length > 0) {
+            return {
+              ...col,
+              valueMode: 'pool' as ValueGenerationMode,
+              valuePool: [...match.valuePool],
+            };
+          } else if (match.mode === 'generator' && match.generatorType) {
+            return {
+              ...col,
+              valueMode: 'generator' as ValueGenerationMode,
+              generatorType: match.generatorType,
+              generatorOptions: { ...col.generatorOptions, ...match.generatorOptions },
+            };
+          } else if (match.mode === 'default') {
+            return {
+              ...col,
+              valueMode: 'default' as ValueGenerationMode,
+            };
+          } else if (match.mode === 'null') {
+            return {
+              ...col,
+              valueMode: 'null' as ValueGenerationMode,
+            };
+          }
+        }
+        return col;
+      });
+
+      showStatus(`Baked ${updatedCount} shared property values into column configurations.`);
+      return {
+        ...prev,
+        columns: updatedCols,
+      };
+    });
+  };
 
   const showStatus = (msg: string) => {
     setStatusMessage(msg);
@@ -683,10 +785,27 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
                 }`}
               >
                 <Layers className="w-3.5 h-3.5" />
-                <span>Columns &amp; Preferred Values</span>
+                <span>Columns &amp; Values</span>
                 <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
                   {options.columns.length}
                 </span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('shared')}
+                className={`pb-2.5 px-3 text-xs font-bold border-b-2 transition-colors flex items-center gap-1.5 ${
+                  activeTab === 'shared'
+                    ? 'border-purple-600 text-purple-600 dark:text-purple-400'
+                    : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                }`}
+              >
+                <Sliders className="w-3.5 h-3.5 text-purple-500" />
+                <span>Shared Properties</span>
+                {activeSharedCount > 0 && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-purple-100 dark:bg-purple-900/60 text-purple-700 dark:text-purple-300 font-bold">
+                    {activeSharedCount}
+                  </span>
+                )}
               </button>
 
               <button
@@ -821,190 +940,229 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
 
               {/* Scrollable Column List */}
               <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-                {options.columns.map((col, index) => (
-                  <div
-                    key={col.id}
-                    className={`p-3.5 rounded-xl border transition-all text-xs ${
-                      col.excludeFromInsert
-                        ? 'border-slate-200 dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-900/30 opacity-70'
-                        : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs'
-                    }`}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5 pb-2 border-b border-slate-100 dark:border-slate-800/60">
-                      {/* Left: Column Name & Type */}
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-mono text-[11px] text-slate-400">#{index + 1}</span>
-                        <input
-                          type="text"
-                          value={col.name}
-                          onChange={(e) => handleUpdateColumn(col.id, { name: e.target.value })}
-                          className="px-2 py-1 font-mono font-bold text-xs rounded-md bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                          placeholder="column_name"
-                        />
+                {options.columns.map((col, index) => {
+                  const matchedShared = findMatchingInsertSharedProperty(col.name, options.sharedProperties, true);
+                  const isInheritingShared = Boolean(matchedShared && matchedShared.active && options.applySharedProperties !== false);
 
-                        {/* Data Type Select */}
-                        <select
-                          value={col.type}
-                          onChange={(e) =>
-                            handleUpdateColumn(col.id, {
-                              type: e.target.value as PostgresInsertType,
-                            })
-                          }
-                          className="px-2 py-1 text-xs rounded-md bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 font-mono text-slate-700 dark:text-slate-300"
-                        >
-                          {COMMON_POSTGRES_TYPES.map((t) => (
-                            <option key={t.type} value={t.type}>
-                              {t.label}
-                            </option>
-                          ))}
-                        </select>
+                  return (
+                    <div
+                      key={col.id}
+                      className={`p-3.5 rounded-xl border transition-all text-xs ${
+                        col.excludeFromInsert
+                          ? 'border-slate-200 dark:border-slate-800/80 bg-slate-50/50 dark:bg-slate-900/30 opacity-70'
+                          : isInheritingShared
+                          ? 'border-purple-300 dark:border-purple-800/80 bg-white dark:bg-slate-900 shadow-2xs ring-1 ring-purple-500/20'
+                          : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-2xs'
+                      }`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5 pb-2 border-b border-slate-100 dark:border-slate-800/60">
+                        {/* Left: Column Name & Type */}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-mono text-[11px] text-slate-400">#{index + 1}</span>
+                          <input
+                            type="text"
+                            value={col.name}
+                            onChange={(e) => handleUpdateColumn(col.id, { name: e.target.value })}
+                            className="px-2 py-1 font-mono font-bold text-xs rounded-md bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                            placeholder="column_name"
+                          />
 
-                        {/* Size Constraints Inputs: Length for VARCHAR/CHAR, Precision & Scale for NUMERIC/DECIMAL */}
-                        {(col.type === 'character varying' || col.type === 'varchar' || col.type === 'character') && (
-                          <div
-                            className="flex items-center gap-1 bg-slate-100 dark:bg-slate-950 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-800 text-[11px]"
-                            title="Maximum string length constraint (e.g. 25 for character varying(25))"
+                          {/* Data Type Select */}
+                          <select
+                            value={col.type}
+                            onChange={(e) =>
+                              handleUpdateColumn(col.id, {
+                                type: e.target.value as PostgresInsertType,
+                              })
+                            }
+                            className="px-2 py-1 text-xs rounded-md bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 font-mono text-slate-700 dark:text-slate-300"
                           >
-                            <span className="text-slate-400 font-mono text-[10px]">len:</span>
-                            <input
-                              type="number"
-                              min={1}
-                              max={10485760}
-                              value={col.maxLength !== undefined ? col.maxLength : ''}
-                              onChange={(e) => {
-                                const val = e.target.value ? parseInt(e.target.value, 10) : undefined;
-                                handleUpdateColumn(col.id, { maxLength: val && val > 0 ? val : undefined });
-                              }}
-                              placeholder="e.g. 25"
-                              className="w-14 bg-transparent text-slate-700 dark:text-slate-300 font-mono text-xs focus:outline-none"
-                            />
-                            {col.maxLength && (
-                              <span className="text-[9px] font-mono px-1 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 font-semibold border border-indigo-200 dark:border-indigo-800/60">
-                                max {col.maxLength}
-                              </span>
-                            )}
-                          </div>
-                        )}
+                            {COMMON_POSTGRES_TYPES.map((t) => (
+                              <option key={t.type} value={t.type}>
+                                {t.label}
+                              </option>
+                            ))}
+                          </select>
 
-                        {(col.type === 'numeric' || col.type === 'decimal') && (
-                          <div
-                            className="flex items-center gap-1 bg-slate-100 dark:bg-slate-950 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-800 text-[11px]"
-                            title="NUMERIC(precision, scale): e.g. precision=2 for numeric(2), or precision=10, scale=2"
-                          >
-                            <span className="text-slate-400 font-mono text-[10px]">p:</span>
-                            <input
-                              type="number"
-                              min={1}
-                              max={1000}
-                              value={col.precision !== undefined ? col.precision : ''}
-                              onChange={(e) => {
-                                const val = e.target.value ? parseInt(e.target.value, 10) : undefined;
-                                handleUpdateColumn(col.id, { precision: val && val > 0 ? val : undefined });
-                              }}
-                              placeholder="prec"
-                              className="w-10 bg-transparent text-slate-700 dark:text-slate-300 font-mono text-xs focus:outline-none"
-                            />
-                            <span className="text-slate-400 font-mono text-[10px] ml-0.5">s:</span>
-                            <input
-                              type="number"
-                              min={0}
-                              max={1000}
-                              value={col.scale !== undefined ? col.scale : ''}
-                              onChange={(e) => {
-                                const val = e.target.value !== '' ? parseInt(e.target.value, 10) : undefined;
-                                handleUpdateColumn(col.id, { scale: val !== undefined && val >= 0 ? val : undefined });
-                              }}
-                              placeholder="scale"
-                              className="w-10 bg-transparent text-slate-700 dark:text-slate-300 font-mono text-xs focus:outline-none"
-                            />
-                            {col.precision && (
-                              <span className="text-[9px] font-mono px-1 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 font-semibold border border-emerald-200 dark:border-emerald-800/60">
-                                max {Math.max(0, col.precision - (col.scale ?? 0)) > 0 ? Math.pow(10, col.precision - (col.scale ?? 0)) - 1 : 0}
-                              </span>
-                            )}
-                          </div>
-                        )}
+                          {/* Size Constraints Inputs: Length for VARCHAR/CHAR, Precision & Scale for NUMERIC/DECIMAL */}
+                          {(col.type === 'character varying' || col.type === 'varchar' || col.type === 'character') && (
+                            <div
+                              className="flex items-center gap-1 bg-slate-100 dark:bg-slate-950 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-800 text-[11px]"
+                              title="Maximum string length constraint (e.g. 25 for character varying(25))"
+                            >
+                              <span className="text-slate-400 font-mono text-[10px]">len:</span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={10485760}
+                                value={col.maxLength !== undefined ? col.maxLength : ''}
+                                onChange={(e) => {
+                                  const val = e.target.value ? parseInt(e.target.value, 10) : undefined;
+                                  handleUpdateColumn(col.id, { maxLength: val && val > 0 ? val : undefined });
+                                }}
+                                placeholder="e.g. 25"
+                                className="w-14 bg-transparent text-slate-700 dark:text-slate-300 font-mono text-xs focus:outline-none"
+                              />
+                              {col.maxLength && (
+                                <span className="text-[9px] font-mono px-1 rounded bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 font-semibold border border-indigo-200 dark:border-indigo-800/60">
+                                  max {col.maxLength}
+                                </span>
+                              )}
+                            </div>
+                          )}
 
-                        {/* Primary Key / Unique Badges */}
-                        <button
-                          type="button"
-                          onClick={() => handleUpdateColumn(col.id, { isPrimaryKey: !col.isPrimaryKey })}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold transition-colors flex items-center gap-1 ${
-                            col.isPrimaryKey
-                              ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30'
-                              : 'bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-slate-600'
-                          }`}
-                          title="Toggle Primary Key"
-                        >
-                          <Key className="w-2.5 h-2.5" />
-                          <span>PK</span>
-                        </button>
+                          {(col.type === 'numeric' || col.type === 'decimal') && (
+                            <div
+                              className="flex items-center gap-1 bg-slate-100 dark:bg-slate-950 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-800 text-[11px]"
+                              title="NUMERIC(precision, scale): e.g. precision=2 for numeric(2), or precision=10, scale=2"
+                            >
+                              <span className="text-slate-400 font-mono text-[10px]">p:</span>
+                              <input
+                                type="number"
+                                min={1}
+                                max={1000}
+                                value={col.precision !== undefined ? col.precision : ''}
+                                onChange={(e) => {
+                                  const val = e.target.value ? parseInt(e.target.value, 10) : undefined;
+                                  handleUpdateColumn(col.id, { precision: val && val > 0 ? val : undefined });
+                                }}
+                                placeholder="prec"
+                                className="w-10 bg-transparent text-slate-700 dark:text-slate-300 font-mono text-xs focus:outline-none"
+                              />
+                              <span className="text-slate-400 font-mono text-[10px] ml-0.5">s:</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={1000}
+                                value={col.scale !== undefined ? col.scale : ''}
+                                onChange={(e) => {
+                                  const val = e.target.value !== '' ? parseInt(e.target.value, 10) : undefined;
+                                  handleUpdateColumn(col.id, { scale: val !== undefined && val >= 0 ? val : undefined });
+                                }}
+                                placeholder="scale"
+                                className="w-10 bg-transparent text-slate-700 dark:text-slate-300 font-mono text-xs focus:outline-none"
+                              />
+                              {col.precision && (
+                                <span className="text-[9px] font-mono px-1 rounded bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 font-semibold border border-emerald-200 dark:border-emerald-800/60">
+                                  max {Math.max(0, col.precision - (col.scale ?? 0)) > 0 ? Math.pow(10, col.precision - (col.scale ?? 0)) - 1 : 0}
+                                </span>
+                              )}
+                            </div>
+                          )}
 
-                        {/* Linked Project Rule Badge */}
-                        {col.linkedProjectRule && (
+                          {/* Primary Key / Unique Badges */}
                           <button
                             type="button"
-                            onClick={() => setShowProjectRulesModal(true)}
-                            className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 flex items-center gap-1 hover:bg-indigo-100 dark:hover:bg-indigo-900 transition-colors"
-                            title={`Linked to Project Rule "${col.linkedProjectRule}". Click to open Project Rules Manager.`}
+                            onClick={() => handleUpdateColumn(col.id, { isPrimaryKey: !col.isPrimaryKey })}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold transition-colors flex items-center gap-1 ${
+                              col.isPrimaryKey
+                                ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30'
+                                : 'bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-slate-600'
+                            }`}
+                            title="Toggle Primary Key"
                           >
-                            <LinkIcon className="w-2.5 h-2.5 text-indigo-500" />
-                            <span>Rule: {col.linkedProjectRule}</span>
+                            <Key className="w-2.5 h-2.5" />
+                            <span>PK</span>
                           </button>
-                        )}
-                      </div>
 
-                      {/* Right: Actions (Move, Duplicate, Exclude, Delete) */}
-                      <div className="flex items-center gap-2">
-                        <div className="flex items-center border border-slate-200 dark:border-slate-800 rounded-md overflow-hidden bg-slate-50 dark:bg-slate-950">
-                          <button
-                            type="button"
-                            disabled={index === 0}
-                            onClick={() => handleMoveColumn(col.id, -1)}
-                            className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors"
-                            title="Move column up"
-                          >
-                            <ArrowUp className="w-3 h-3" />
-                          </button>
-                          <button
-                            type="button"
-                            disabled={index === options.columns.length - 1}
-                            onClick={() => handleMoveColumn(col.id, 1)}
-                            className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors border-l border-slate-200 dark:border-slate-800"
-                            title="Move column down"
-                          >
-                            <ArrowDown className="w-3 h-3" />
-                          </button>
+                          {/* Inherited Shared Property Badge */}
+                          {isInheritingShared && matchedShared && (
+                            <button
+                              type="button"
+                              onClick={() => setActiveTab('shared')}
+                              className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 flex items-center gap-1 hover:bg-purple-100 dark:hover:bg-purple-900 transition-colors"
+                              title={`Inheriting Shared Property "${matchedShared.columnName}" (${matchedShared.mode}: ${matchedShared.constantValue || matchedShared.expression || matchedShared.mode}). Click to open Shared Properties.`}
+                            >
+                              <Sliders className="w-2.5 h-2.5 text-purple-500" />
+                              <span>Shared: {matchedShared.columnName}</span>
+                            </button>
+                          )}
+
+                          {/* Linked Project Rule Badge */}
+                          {col.linkedProjectRule && (
+                            <button
+                              type="button"
+                              onClick={() => setShowProjectRulesModal(true)}
+                              className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 flex items-center gap-1 hover:bg-indigo-100 dark:hover:bg-indigo-900 transition-colors"
+                              title={`Linked to Project Rule "${col.linkedProjectRule}". Click to open Project Rules Manager.`}
+                            >
+                              <LinkIcon className="w-2.5 h-2.5 text-indigo-500" />
+                              <span>Rule: {col.linkedProjectRule}</span>
+                            </button>
+                          )}
                         </div>
 
-                        <button
-                          type="button"
-                          onClick={() => handleDuplicateColumn(col.id)}
-                          className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
-                          title="Duplicate column"
-                        >
-                          <Copy className="w-3.5 h-3.5" />
-                        </button>
+                        {/* Right: Actions (Move, Duplicate, Exclude, Delete) */}
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-center border border-slate-200 dark:border-slate-800 rounded-md overflow-hidden bg-slate-50 dark:bg-slate-950">
+                            <button
+                              type="button"
+                              disabled={index === 0}
+                              onClick={() => handleMoveColumn(col.id, -1)}
+                              className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors"
+                              title="Move column up"
+                            >
+                              <ArrowUp className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={index === options.columns.length - 1}
+                              onClick={() => handleMoveColumn(col.id, 1)}
+                              className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 disabled:opacity-30 disabled:hover:text-slate-400 transition-colors border-l border-slate-200 dark:border-slate-800"
+                              title="Move column down"
+                            >
+                              <ArrowDown className="w-3 h-3" />
+                            </button>
+                          </div>
 
-                        <label className="flex items-center gap-1.5 cursor-pointer text-slate-600 dark:text-slate-400 select-none ml-1">
-                          <input
-                            type="checkbox"
-                            checked={col.excludeFromInsert}
-                            onChange={(e) => handleUpdateColumn(col.id, { excludeFromInsert: e.target.checked })}
-                            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                          />
-                          <span>Exclude (auto sequence)</span>
-                        </label>
+                          <button
+                            type="button"
+                            onClick={() => handleDuplicateColumn(col.id)}
+                            className="p-1 rounded text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition-colors"
+                            title="Duplicate column"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </button>
 
-                        <button
-                          onClick={() => handleRemoveColumn(col.id)}
-                          className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
-                          title="Remove column"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                          <label className="flex items-center gap-1.5 cursor-pointer text-slate-600 dark:text-slate-400 select-none ml-1">
+                            <input
+                              type="checkbox"
+                              checked={col.excludeFromInsert}
+                              onChange={(e) => handleUpdateColumn(col.id, { excludeFromInsert: e.target.checked })}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                            />
+                            <span>Exclude (auto sequence)</span>
+                          </label>
+
+                          <button
+                            onClick={() => handleRemoveColumn(col.id)}
+                            className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
+                            title="Remove column"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
-                    </div>
+
+                      {/* Shared Property Inheritance Banner */}
+                      {isInheritingShared && matchedShared && !col.excludeFromInsert && (
+                        <div className="mb-2.5 p-2 rounded-lg bg-purple-50/80 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800/60 flex items-center justify-between text-[11px] text-purple-800 dark:text-purple-300">
+                          <div className="flex items-center gap-1.5 font-mono">
+                            <Sliders className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                            <span>
+                              Inheriting Shared Property: <strong>{matchedShared.columnName}</strong> ({matchedShared.mode}
+                              {matchedShared.constantValue ? ` = "${matchedShared.constantValue}"` : matchedShared.expression ? ` = ${matchedShared.expression}` : ''})
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setActiveTab('shared')}
+                            className="text-[10px] font-semibold text-purple-700 dark:text-purple-400 hover:underline shrink-0 ml-2"
+                          >
+                            View in Shared Tab &rarr;
+                          </button>
+                        </div>
+                      )}
 
                     {/* Value Generation Configuration */}
                     {!col.excludeFromInsert && (
@@ -1268,10 +1426,26 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
                       </div>
                     )}
                   </div>
-                ))}
-              </div>
+                );
+              })}
             </div>
-          )}
+          </div>
+        )}
+
+        {/* Tab 2: General Shared Properties */}
+        {activeTab === 'shared' && (
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <SharedPropertiesInsertEditor
+              columns={options.columns}
+              sharedProperties={options.sharedProperties || {}}
+              applySharedProperties={options.applySharedProperties !== false}
+              onUpdateSharedProperty={handleUpdateSharedProperty}
+              onBatchUpdateSharedProperties={handleBatchUpdateSharedProperties}
+              onToggleApplySharedProperties={handleToggleApplySharedProperties}
+              onApplySharedToColumns={handleApplySharedToColumns}
+            />
+          </div>
+        )}
 
           {/* Tab 2: Strategy, ON CONFLICT & Transaction Options */}
           {activeTab === 'options' && (
@@ -1592,6 +1766,18 @@ export const DbInsertQueryGeneratorTool: React.FC<DbInsertQueryGeneratorToolProp
                   }`}
                 >
                   Params JSON
+                </button>
+              )}
+
+              {queryResult.sharedPropertiesApplied && queryResult.sharedPropertiesApplied.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('shared')}
+                  className="px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 flex items-center gap-1 hover:bg-purple-100 transition-colors"
+                  title={`Inheriting Shared Properties on columns: ${queryResult.sharedPropertiesApplied.join(', ')}. Click to configure.`}
+                >
+                  <Sliders className="w-2.5 h-2.5 text-purple-500" />
+                  <span>{queryResult.sharedPropertiesApplied.length} Shared</span>
                 </button>
               )}
             </div>

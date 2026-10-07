@@ -82,6 +82,14 @@ export const SqlOutputPreview: React.FC<SqlOutputPreviewProps> = ({
               <span className="text-indigo-600 dark:text-indigo-400 font-medium">
                 {copySummary.overridden} overridden
               </span>
+              {Boolean(copySummary.sharedApplied && copySummary.sharedApplied > 0) && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span className="text-purple-600 dark:text-purple-400 font-medium">
+                    {copySummary.sharedApplied} shared properties
+                  </span>
+                </>
+              )}
               {copySummary.excluded > 0 && (
                 <>
                   <span aria-hidden="true">·</span>

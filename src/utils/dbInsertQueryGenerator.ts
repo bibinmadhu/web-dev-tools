@@ -103,6 +103,149 @@ export type InsertStrategy =
   | 'cte_values'
   | 'parameterized';
 
+export type InsertSharedMode =
+  | 'constant'
+  | 'expression'
+  | 'pool'
+  | 'generator'
+  | 'default'
+  | 'null';
+
+export interface InsertSharedPropertyRule {
+  id: string;
+  columnName: string; // Target column name to match (e.g. 'tenant_id', 'created_by', 'status', etc.)
+  mode: InsertSharedMode;
+  constantValue?: string;
+  expression?: string;
+  valuePool?: string[];
+  generatorType?: GeneratorType;
+  generatorOptions?: GeneratorOptions;
+  active: boolean;
+  description?: string;
+  isCustom?: boolean; // false if populated from schema, true if custom added
+  matchCaseInsensitive?: boolean; // default true
+}
+
+export const ENTERPRISE_INSERT_SHARED_TEMPLATES: InsertSharedPropertyRule[] = [
+  {
+    id: 'sp_tmpl_tenant_id',
+    columnName: 'tenant_id',
+    mode: 'constant',
+    constantValue: 'tenant_demo_101',
+    active: true,
+    description: 'Multi-tenant partition key (Enterprise Isolation)',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'sp_tmpl_created_by',
+    columnName: 'created_by',
+    mode: 'constant',
+    constantValue: 'system_batch_loader',
+    active: true,
+    description: 'Audit trail user identity for inserted records',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'sp_tmpl_updated_by',
+    columnName: 'updated_by',
+    mode: 'constant',
+    constantValue: 'system_batch_loader',
+    active: true,
+    description: 'Last modifier audit user',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'sp_tmpl_created_at',
+    columnName: 'created_at',
+    mode: 'expression',
+    expression: 'CURRENT_TIMESTAMP',
+    active: true,
+    description: 'Automatic record creation timestamp',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'sp_tmpl_updated_at',
+    columnName: 'updated_at',
+    mode: 'expression',
+    expression: 'CURRENT_TIMESTAMP',
+    active: true,
+    description: 'Automatic record update timestamp',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'sp_tmpl_status',
+    columnName: 'status',
+    mode: 'constant',
+    constantValue: 'ACTIVE',
+    active: true,
+    description: 'Default lifecycle state for new entity inserts',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'sp_tmpl_is_active',
+    columnName: 'is_active',
+    mode: 'constant',
+    constantValue: 'true',
+    active: true,
+    description: 'Active entity flag default',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'sp_tmpl_version',
+    columnName: 'version',
+    mode: 'constant',
+    constantValue: '1',
+    active: true,
+    description: 'Initial optimistic concurrency lock version',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'sp_tmpl_environment',
+    columnName: 'environment',
+    mode: 'constant',
+    constantValue: 'PRODUCTION',
+    active: true,
+    description: 'Deployment environment identifier',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+];
+
+/**
+ * Finds an active matching shared property rule for a column name in insert query generator.
+ */
+export function findMatchingInsertSharedProperty(
+  colName: string,
+  sharedProperties?: Record<string, InsertSharedPropertyRule>,
+  matchCaseInsensitive: boolean = true
+): InsertSharedPropertyRule | undefined {
+  if (!sharedProperties || !colName) return undefined;
+
+  // 1. Exact match
+  const exact = sharedProperties[colName];
+  if (exact && exact.active) return exact;
+
+  // 2. Case-insensitive match if enabled
+  if (matchCaseInsensitive) {
+    const lower = colName.toLowerCase();
+    for (const rule of Object.values(sharedProperties)) {
+      if (rule.active && rule.columnName.toLowerCase() === lower) {
+        return rule;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 export interface InsertQueryOptions {
   tableName: string;
   schema: string;
@@ -119,6 +262,8 @@ export interface InsertQueryOptions {
   includeComments: boolean;
   generalDescriptiveTextTemplate?: string;
   customGridRows?: Record<string, any>[];
+  sharedProperties?: Record<string, InsertSharedPropertyRule>;
+  applySharedProperties?: boolean; // default true: whether matching columns automatically inherit shared properties
 }
 
 export interface GeneratedInsertResult {
@@ -126,6 +271,7 @@ export interface GeneratedInsertResult {
   rowCount: number;
   columnsIncluded: string[];
   columnsExcluded: string[];
+  sharedPropertiesApplied?: string[];
   parameterValues?: any[][];
   parametersJson?: string;
   previewRows?: Record<string, any>[];
@@ -277,6 +423,39 @@ export const DEFAULT_INSERT_OPTIONS: InsertQueryOptions = {
   includeTypeCasts: false,
   includeComments: true,
   generalDescriptiveTextTemplate: '',
+  sharedProperties: {
+    tenant_id: {
+      id: 'sp_def_tenant',
+      columnName: 'tenant_id',
+      mode: 'constant',
+      constantValue: 'tenant_demo_101',
+      active: true,
+      description: 'Multi-tenant organization partition',
+      isCustom: true,
+      matchCaseInsensitive: true,
+    },
+    is_active: {
+      id: 'sp_def_active',
+      columnName: 'is_active',
+      mode: 'constant',
+      constantValue: 'true',
+      active: true,
+      description: 'Active entity flag default',
+      isCustom: false,
+      matchCaseInsensitive: true,
+    },
+    created_by: {
+      id: 'sp_def_creator',
+      columnName: 'created_by',
+      mode: 'constant',
+      constantValue: 'system_batch_loader',
+      active: true,
+      description: 'Audit user for generated rows',
+      isCustom: true,
+      matchCaseInsensitive: true,
+    },
+  },
+  applySharedProperties: true,
 };
 
 // Seeded mock data dictionaries for realistic mock generation
@@ -705,6 +884,77 @@ export function generateColumnValue(
 }
 
 /**
+ * Resolves the SQL formatted value and raw JavaScript value for a column that inherits from an active SharedPropertyRule
+ */
+export function resolveInsertSharedPropertyValue(
+  rule: InsertSharedPropertyRule,
+  col: InsertColumnConfig,
+  rowIndex: number,
+  totalRows: number,
+  includeTypeCasts = false
+): { formatted: string; raw: any } {
+  // Mode: default
+  if (rule.mode === 'default') {
+    return { formatted: 'DEFAULT', raw: 'DEFAULT' };
+  }
+
+  // Mode: null
+  if (rule.mode === 'null') {
+    return { formatted: 'NULL', raw: null };
+  }
+
+  // Mode: expression
+  if (rule.mode === 'expression') {
+    const expr = (rule.expression || 'CURRENT_TIMESTAMP').trim();
+    return { formatted: expr, raw: expr };
+  }
+
+  // Mode: pool
+  if (rule.mode === 'pool' && rule.valuePool && rule.valuePool.length > 0) {
+    let poolVal = rule.valuePool[rowIndex % rule.valuePool.length];
+    if ((col.type === 'character varying' || col.type === 'varchar' || col.type === 'character' || col.type === 'text') && col.maxLength) {
+      poolVal = clampStringToMaxLength(String(poolVal), col.maxLength);
+      return { formatted: formatPostgresInsertValue(poolVal, col.type, includeTypeCasts, col), raw: poolVal };
+    }
+    if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+      const { formatted, num } = clampNumericToPrecisionScale(poolVal, col.precision, col.scale ?? 0, rowIndex);
+      return { formatted: formatPostgresInsertValue(formatted, col.type, includeTypeCasts, col), raw: num };
+    }
+    return { formatted: formatPostgresInsertValue(poolVal, col.type, includeTypeCasts, col), raw: poolVal };
+  }
+
+  // Mode: generator
+  if (rule.mode === 'generator') {
+    const syntheticCol: InsertColumnConfig = {
+      ...col,
+      valueMode: 'generator',
+      generatorType: rule.generatorType || col.generatorType || 'sequential_int',
+      generatorOptions: { ...col.generatorOptions, ...rule.generatorOptions },
+    };
+    const genVal = generateColumnValue(syntheticCol, rowIndex, totalRows);
+    if (includeTypeCasts && genVal.formatted !== 'DEFAULT' && genVal.formatted !== 'NULL') {
+      return {
+        formatted: formatPostgresInsertValue(genVal.raw, col.type, true, col),
+        raw: genVal.raw,
+      };
+    }
+    return genVal;
+  }
+
+  // Mode: constant (default)
+  let val = rule.constantValue !== undefined ? rule.constantValue : '';
+  if ((col.type === 'character varying' || col.type === 'varchar' || col.type === 'character' || col.type === 'text') && col.maxLength) {
+    val = clampStringToMaxLength(String(val), col.maxLength);
+    return { formatted: formatPostgresInsertValue(val, col.type, includeTypeCasts, col), raw: val };
+  }
+  if ((col.type === 'numeric' || col.type === 'decimal') && col.precision) {
+    const { formatted, num } = clampNumericToPrecisionScale(val, col.precision, col.scale ?? 0, rowIndex);
+    return { formatted: formatPostgresInsertValue(formatted, col.type, includeTypeCasts, col), raw: num };
+  }
+  return { formatted: formatPostgresInsertValue(val, col.type, includeTypeCasts, col), raw: val };
+}
+
+/**
  * Builds the ON CONFLICT clause for PostgreSQL
  */
 export function buildConflictClause(
@@ -753,6 +1003,9 @@ export function generatePostgresInsertQuery(options: InsertQueryOptions): Genera
   const opts: InsertQueryOptions = {
     ...DEFAULT_INSERT_OPTIONS,
     ...options,
+    sharedProperties: options.sharedProperties !== undefined
+      ? options.sharedProperties
+      : (options.columns ? undefined : DEFAULT_INSERT_OPTIONS.sharedProperties),
   };
 
   const activeColumns = opts.columns.filter((col) => !col.excludeFromInsert);
@@ -768,6 +1021,17 @@ export function generatePostgresInsertQuery(options: InsertQueryOptions): Genera
       columnsIncluded: [],
       columnsExcluded: columnsExcludedNames,
     };
+  }
+
+  // Identify which active columns inherit from an active matching shared property
+  const sharedColsApplied: string[] = [];
+  if (opts.applySharedProperties !== false && opts.sharedProperties) {
+    for (const col of activeColumns) {
+      const match = findMatchingInsertSharedProperty(col.name, opts.sharedProperties);
+      if (match && match.active) {
+        sharedColsApplied.push(col.name);
+      }
+    }
   }
 
   const tableIdentifier = opts.schema && opts.schema !== 'public'
@@ -801,6 +1065,9 @@ export function generatePostgresInsertQuery(options: InsertQueryOptions): Genera
     if (excludedColumns.length > 0) {
       lines.push(`-- Excluded Columns: ${excludedColumns.map((c) => c.name).join(', ')}`);
     }
+    if (sharedColsApplied.length > 0) {
+      lines.push(`-- Shared Properties Inherited (${sharedColsApplied.length}): ${sharedColsApplied.join(', ')}`);
+    }
     if (opts.conflictStrategy !== 'none') {
       lines.push(`-- Upsert Strategy: ${opts.conflictStrategy.toUpperCase()}`);
     }
@@ -811,11 +1078,12 @@ export function generatePostgresInsertQuery(options: InsertQueryOptions): Genera
     lines.push('BEGIN;\n');
   }
 
-  // Pre-generate raw row values (incorporating custom user-edited grid rows if provided)
+  // Pre-generate raw row values (incorporating custom user-edited grid rows and shared properties)
   const rowValues: { formatted: string; raw: any }[][] = [];
   for (let r = 0; r < totalRows; r++) {
     const customRow = opts.customGridRows && opts.customGridRows[r] ? opts.customGridRows[r] : null;
     const row = activeColumns.map((col) => {
+      // 1. Interactive custom cell edit takes precedence
       if (customRow && customRow[col.name] !== undefined) {
         const val = customRow[col.name];
         if (val === null || val === undefined || (typeof val === 'string' && val.trim().toUpperCase() === 'NULL')) {
@@ -844,6 +1112,22 @@ export function generatePostgresInsertQuery(options: InsertQueryOptions): Genera
           raw: val,
         };
       }
+
+      // 2. Shared property inheritance (if active and enabled)
+      if (opts.applySharedProperties !== false && opts.sharedProperties) {
+        const matchedShared = findMatchingInsertSharedProperty(col.name, opts.sharedProperties);
+        if (matchedShared && matchedShared.active) {
+          return resolveInsertSharedPropertyValue(
+            matchedShared,
+            col,
+            r,
+            totalRows,
+            opts.includeTypeCasts
+          );
+        }
+      }
+
+      // 3. Standard column-configured generator/pool/fixed value
       return generateColumnValue(col, r, totalRows, {
         generalDescriptiveTextTemplate: opts.generalDescriptiveTextTemplate,
         tableName: opts.tableName,
@@ -950,6 +1234,7 @@ export function generatePostgresInsertQuery(options: InsertQueryOptions): Genera
     rowCount: totalRows,
     columnsIncluded: columnsIncludedNames,
     columnsExcluded: columnsExcludedNames,
+    sharedPropertiesApplied: sharedColsApplied,
     parameterValues: parameterValues.length > 0 ? parameterValues : undefined,
     parametersJson: parameterValues.length > 0 ? JSON.stringify(parameterValues, null, 2) : undefined,
     previewRows,
@@ -1317,6 +1602,30 @@ export function validateAndParseDbInsertConfig(jsonString: string): {
       linkedProjectRule: c.linkedProjectRule ? String(c.linkedProjectRule) : undefined,
     }));
 
+    let sanitizedSharedProperties: Record<string, InsertSharedPropertyRule> | undefined = undefined;
+    if (config.sharedProperties && typeof config.sharedProperties === 'object') {
+      sanitizedSharedProperties = {};
+      for (const [key, rule] of Object.entries(config.sharedProperties)) {
+        if (rule && typeof rule === 'object') {
+          const r = rule as any;
+          sanitizedSharedProperties[key] = {
+            id: r.id || `sp_${key}_${Date.now()}`,
+            columnName: String(r.columnName || key),
+            mode: ['constant', 'expression', 'pool', 'generator', 'default', 'null'].includes(r.mode) ? r.mode : 'constant',
+            constantValue: r.constantValue !== undefined ? String(r.constantValue) : undefined,
+            expression: r.expression !== undefined ? String(r.expression) : undefined,
+            valuePool: Array.isArray(r.valuePool) ? r.valuePool.map(String) : undefined,
+            generatorType: r.generatorType || undefined,
+            generatorOptions: r.generatorOptions && typeof r.generatorOptions === 'object' ? r.generatorOptions : undefined,
+            active: r.active !== undefined ? Boolean(r.active) : true,
+            description: r.description ? String(r.description) : undefined,
+            isCustom: r.isCustom !== undefined ? Boolean(r.isCustom) : true,
+            matchCaseInsensitive: r.matchCaseInsensitive !== undefined ? Boolean(r.matchCaseInsensitive) : true,
+          };
+        }
+      }
+    }
+
     const sanitizedOptions: InsertQueryOptions = {
       tableName: config.tableName.trim(),
       schema: config.schema || 'public',
@@ -1333,6 +1642,8 @@ export function validateAndParseDbInsertConfig(jsonString: string): {
       includeComments: config.includeComments !== undefined ? Boolean(config.includeComments) : true,
       generalDescriptiveTextTemplate: typeof config.generalDescriptiveTextTemplate === 'string' ? config.generalDescriptiveTextTemplate : '',
       customGridRows: Array.isArray(config.customGridRows) ? config.customGridRows : undefined,
+      sharedProperties: sanitizedSharedProperties,
+      applySharedProperties: config.applySharedProperties !== undefined ? Boolean(config.applySharedProperties) : true,
     };
 
     return { success: true, options: sanitizedOptions };
@@ -1458,6 +1769,39 @@ export const DB_INSERT_PRESETS: {
       wrapInTransaction: false,
       includeTypeCasts: false,
       includeComments: true,
+      sharedProperties: {
+        tenant_id: {
+          id: 'sp_ord_tenant',
+          columnName: 'tenant_id',
+          mode: 'constant',
+          constantValue: 'tenant_ecommerce_main',
+          active: true,
+          description: 'Global tenant partition key',
+          isCustom: true,
+          matchCaseInsensitive: true,
+        },
+        status: {
+          id: 'sp_ord_status',
+          columnName: 'status',
+          mode: 'constant',
+          constantValue: 'CONFIRMED',
+          active: true,
+          description: 'Default lifecycle state for freshly imported orders',
+          isCustom: false,
+          matchCaseInsensitive: true,
+        },
+        created_at: {
+          id: 'sp_ord_created',
+          columnName: 'created_at',
+          mode: 'expression',
+          expression: 'CURRENT_TIMESTAMP',
+          active: true,
+          description: 'Row generation timestamp',
+          isCustom: false,
+          matchCaseInsensitive: true,
+        },
+      },
+      applySharedProperties: true,
     },
   },
   {

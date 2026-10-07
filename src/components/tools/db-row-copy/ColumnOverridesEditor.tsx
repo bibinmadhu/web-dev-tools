@@ -20,11 +20,14 @@ import {
   OverrideMode,
   RandomMockType,
   ColumnDataType,
+  SharedPropertyRule,
+  findMatchingSharedProperty,
 } from '../../../utils/dbRowCopyGenerator';
 
 interface ColumnOverridesEditorProps {
   columns: TableColumn[];
   overrides: Record<string, ColumnOverride>;
+  sharedProperties?: Record<string, SharedPropertyRule>;
   onUpdateOverride: (colName: string, override: Partial<ColumnOverride> | null) => void;
   onBatchApplyOverrides: (newOverrides: Record<string, ColumnOverride>) => void;
 }
@@ -32,6 +35,7 @@ interface ColumnOverridesEditorProps {
 export const ColumnOverridesEditor: React.FC<ColumnOverridesEditorProps> = ({
   columns,
   overrides,
+  sharedProperties = {},
   onUpdateOverride,
   onBatchApplyOverrides,
 }) => {
@@ -257,6 +261,8 @@ export const ColumnOverridesEditor: React.FC<ColumnOverridesEditorProps> = ({
           const override = overrides[col.name];
           const isActive = Boolean(override?.active);
           const currentMode: OverrideMode = override?.mode || 'constant';
+          const matchedShared = findMatchingSharedProperty(col.name, sharedProperties);
+          const isInheritingShared = !isActive && Boolean(matchedShared && matchedShared.active);
 
           return (
             <div
@@ -266,6 +272,8 @@ export const ColumnOverridesEditor: React.FC<ColumnOverridesEditorProps> = ({
                   ? override.mode === 'exclude'
                     ? 'bg-amber-50/50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/60'
                     : 'bg-indigo-50/40 dark:bg-indigo-950/20 border-indigo-200 dark:border-indigo-800/60'
+                  : isInheritingShared
+                  ? 'bg-purple-50/30 dark:bg-purple-950/15 border-purple-200/80 dark:border-purple-800/50'
                   : 'bg-slate-50/60 dark:bg-slate-900/40 border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
               }`}
             >
@@ -307,19 +315,69 @@ export const ColumnOverridesEditor: React.FC<ColumnOverridesEditorProps> = ({
                   )}
                 </div>
 
-                <div>
+                <div className="flex items-center gap-2">
                   {isActive ? (
-                    <span
-                      className={`text-[11px] font-medium font-mono px-2 py-0.5 rounded ${
-                        override.mode === 'exclude'
-                          ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300'
-                          : 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300'
-                      }`}
-                    >
-                      {override.mode === 'exclude'
-                        ? 'Omitted from INSERT (Auto Default)'
-                        : `Override: ${override.mode}`}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={`text-[11px] font-medium font-mono px-2 py-0.5 rounded ${
+                          override.mode === 'exclude'
+                            ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300'
+                            : 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300'
+                        }`}
+                      >
+                        {override.mode === 'exclude'
+                          ? 'Omitted from INSERT (Auto Default)'
+                          : `Override: ${override.mode}`}
+                      </span>
+
+                      {matchedShared && matchedShared.active && (
+                        <button
+                          type="button"
+                          onClick={() => onUpdateOverride(col.name, null)}
+                          className="text-[10px] text-purple-600 dark:text-purple-400 hover:underline px-1 py-0.5"
+                          title="Revert table override and inherit from shared property"
+                        >
+                          Revert to Shared
+                        </button>
+                      )}
+                    </div>
+                  ) : isInheritingShared ? (
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="text-[11px] font-medium text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-950/40 px-2 py-0.5 rounded border border-purple-200 dark:border-purple-800/60 flex items-center gap-1"
+                        title={`Inherited from generic shared property: ${matchedShared?.description || ''}`}
+                      >
+                        <Sparkles className="w-2.5 h-2.5 text-purple-500" />
+                        <span>
+                          Shared: {matchedShared?.mode} (
+                          {matchedShared?.constantValue ||
+                            matchedShared?.expression ||
+                            matchedShared?.randomType ||
+                            matchedShared?.mode}
+                          )
+                        </span>
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onUpdateOverride(col.name, {
+                            columnName: col.name,
+                            mode: matchedShared?.mode || 'constant',
+                            constantValue: matchedShared?.constantValue,
+                            expression: matchedShared?.expression,
+                            prefix: matchedShared?.prefix,
+                            suffix: matchedShared?.suffix,
+                            sequenceStep: matchedShared?.sequenceStep,
+                            randomType: matchedShared?.randomType,
+                            active: true,
+                          })
+                        }
+                        className="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline px-1 py-0.5 font-medium"
+                      >
+                        Customize Table
+                      </button>
+                    </div>
                   ) : col.isIdentity || (col.identityType && col.identityType !== 'none') ? (
                     <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-500/20">
                       ⚡ Auto-Omitted (DB Identity Sequence)

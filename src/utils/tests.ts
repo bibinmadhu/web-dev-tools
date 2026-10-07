@@ -102,6 +102,9 @@ import {
   DEFAULT_INSERT_OPTIONS,
   DB_INSERT_PRESETS,
   InsertColumnConfig,
+  InsertSharedPropertyRule,
+  findMatchingInsertSharedProperty,
+  ENTERPRISE_INSERT_SHARED_TEMPLATES,
 } from './dbInsertQueryGenerator';
 import {
   parseJsonSafe,
@@ -4186,15 +4189,15 @@ CREATE TABLE "size_test" (
       ...clampedColOpts,
       rowCount: 2,
       customGridRows: [
-        { short_code: 'USER_EDIT_1', small_num: 45 },
-        { short_code: 'USER_EDIT_2', small_num: 'DEFAULT' },
+        { short_code: 'USER_ED_1', small_num: 45 },
+        { short_code: 'USER_ED_2', small_num: 'DEFAULT' },
       ],
     };
     const gridResult = generatePostgresInsertQuery(gridEditedOpts);
-    assertTrue(gridResult.sql.includes("'USER_EDIT_1'"), 'SQL query includes user-edited grid cell value USER_EDIT_1');
+    assertTrue(gridResult.sql.includes("'USER_ED_1'"), 'SQL query includes user-edited grid cell value USER_ED_1');
     assertTrue(gridResult.sql.includes('45'), 'SQL query includes user-edited numeric cell value 45');
     assertTrue(gridResult.sql.includes('DEFAULT'), 'SQL query includes user-edited DEFAULT value');
-    assertEqual(gridResult.previewRows?.[0]['short_code'], 'USER_EDIT_1', 'Preview row 0 reflects custom grid short_code');
+    assertEqual(gridResult.previewRows?.[0]['short_code'], 'USER_ED_1', 'Preview row 0 reflects custom grid short_code');
     assertEqual(gridResult.previewRows?.[0]['small_num'], 45, 'Preview row 0 reflects custom grid small_num');
     assertEqual(gridResult.previewRows?.[1]['small_num'], 'DEFAULT', 'Preview row 1 reflects custom grid DEFAULT');
 
@@ -4484,6 +4487,332 @@ CREATE TABLE "size_test" (
     assertEqual(gridFixedRes.previewRows?.[0]['status'], 'CONFIRMED', 'Preview row 1 has fixed value CONFIRMED');
     assertEqual(gridFixedRes.previewRows?.[1]['status'], 'CONFIRMED', 'Preview row 2 has fixed value CONFIRMED');
     assertEqual(gridFixedRes.previewRows?.[2]['status'], 'CONFIRMED', 'Preview row 3 has fixed value CONFIRMED');
+  });
+
+  test('Database Insert Generator', 'General Shared Properties Reusability, Matching & Modes', () => {
+    // 1. Shared rules dictionary
+    const sharedRules: Record<string, InsertSharedPropertyRule> = {
+      tenant_id: {
+        id: 'sp_t1',
+        columnName: 'tenant_id',
+        mode: 'constant',
+        constantValue: 'tenant_shared_99',
+        active: true,
+        matchCaseInsensitive: true,
+      },
+      created_by: {
+        id: 'sp_t2',
+        columnName: 'created_by',
+        mode: 'constant',
+        constantValue: 'sys_admin_user',
+        active: true,
+        matchCaseInsensitive: true,
+      },
+      created_at: {
+        id: 'sp_t3',
+        columnName: 'created_at',
+        mode: 'expression',
+        expression: 'CURRENT_TIMESTAMP',
+        active: true,
+        matchCaseInsensitive: true,
+      },
+      environment: {
+        id: 'sp_t4',
+        columnName: 'environment',
+        mode: 'pool',
+        valuePool: ['PROD-1', 'PROD-2'],
+        active: true,
+        matchCaseInsensitive: true,
+      },
+      inactive_col: {
+        id: 'sp_t5',
+        columnName: 'inactive_col',
+        mode: 'constant',
+        constantValue: 'INACTIVE_VAL',
+        active: false,
+        matchCaseInsensitive: true,
+      },
+    };
+
+    // 2. Matching function tests
+    const matchExact = findMatchingInsertSharedProperty('tenant_id', sharedRules);
+    assertTrue(Boolean(matchExact), 'Exact match on tenant_id found');
+    assertEqual(matchExact?.constantValue, 'tenant_shared_99', 'Matched constant value');
+
+    const matchCase = findMatchingInsertSharedProperty('TENANT_ID', sharedRules, true);
+    assertTrue(Boolean(matchCase), 'Case-insensitive match on TENANT_ID found');
+    assertEqual(matchCase?.columnName, 'tenant_id', 'Matched canonical column name');
+
+    const matchInactive = findMatchingInsertSharedProperty('inactive_col', sharedRules);
+    assertEqual(matchInactive, undefined, 'Inactive shared rule does not match');
+
+    const matchNonExistent = findMatchingInsertSharedProperty('unknown_field', sharedRules);
+    assertEqual(matchNonExistent, undefined, 'Unknown column name does not match');
+
+    // 3. Query Generation with shared properties applied
+    const testCols: InsertColumnConfig[] = [
+      {
+        id: 'col_1',
+        name: 'tenant_id',
+        type: 'varchar',
+        nullable: false,
+        hasDefault: false,
+        isPrimaryKey: false,
+        isUnique: false,
+        excludeFromInsert: false,
+        valueMode: 'generator',
+        fixedValue: '',
+        valuePool: [],
+        generatorType: 'company',
+      },
+      {
+        id: 'col_2',
+        name: 'created_by',
+        type: 'varchar',
+        nullable: false,
+        hasDefault: false,
+        isPrimaryKey: false,
+        isUnique: false,
+        excludeFromInsert: false,
+        valueMode: 'generator',
+        fixedValue: '',
+        valuePool: [],
+        generatorType: 'name',
+      },
+      {
+        id: 'col_3',
+        name: 'created_at',
+        type: 'timestamptz',
+        nullable: false,
+        hasDefault: false,
+        isPrimaryKey: false,
+        isUnique: false,
+        excludeFromInsert: false,
+        valueMode: 'generator',
+        fixedValue: '',
+        valuePool: [],
+        generatorType: 'current_timestamp',
+      },
+      {
+        id: 'col_4',
+        name: 'environment',
+        type: 'varchar',
+        nullable: false,
+        hasDefault: false,
+        isPrimaryKey: false,
+        isUnique: false,
+        excludeFromInsert: false,
+        valueMode: 'generator',
+        fixedValue: '',
+        valuePool: [],
+        generatorType: 'name',
+      },
+      {
+        id: 'col_5',
+        name: 'item_name',
+        type: 'varchar',
+        nullable: false,
+        hasDefault: false,
+        isPrimaryKey: false,
+        isUnique: false,
+        excludeFromInsert: false,
+        valueMode: 'generator',
+        fixedValue: '',
+        valuePool: [],
+        generatorType: 'company',
+      },
+    ];
+
+    const queryOpts = {
+      tableName: 'tenant_records',
+      schema: 'public',
+      columns: testCols,
+      rowCount: 4,
+      insertStrategy: 'bulk_single_statement' as const,
+      batchSize: 100,
+      conflictStrategy: 'none' as const,
+      conflictTargetColumns: [],
+      conflictUpdateColumns: [],
+      returningClause: '',
+      wrapInTransaction: false,
+      includeTypeCasts: false,
+      includeComments: true,
+      sharedProperties: sharedRules,
+      applySharedProperties: true,
+    };
+
+    const res = generatePostgresInsertQuery(queryOpts);
+
+    // Verify shared properties applied to output
+    assertTrue(res.sql.includes("'tenant_shared_99'"), 'SQL contains shared constant tenant_shared_99');
+    assertTrue(res.sql.includes("'sys_admin_user'"), 'SQL contains shared constant sys_admin_user');
+    assertTrue(res.sql.includes('CURRENT_TIMESTAMP'), 'SQL contains shared expression CURRENT_TIMESTAMP');
+    assertTrue(res.sql.includes("'PROD-1'"), 'SQL contains shared pool PROD-1');
+    assertTrue(res.sql.includes("'PROD-2'"), 'SQL contains shared pool PROD-2');
+    assertTrue(res.sql.includes('-- Shared Properties Inherited (4): tenant_id, created_by, created_at, environment'), 'Comment contains shared columns count and list');
+    assertEqual(res.sharedPropertiesApplied?.length, 4, '4 shared properties recorded in result');
+
+    // 4. Verify preview rows
+    assertEqual(res.previewRows?.[0]['tenant_id'], 'tenant_shared_99', 'Row 0 tenant_id matches');
+    assertEqual(res.previewRows?.[0]['created_by'], 'sys_admin_user', 'Row 0 created_by matches');
+    assertEqual(res.previewRows?.[0]['environment'], 'PROD-1', 'Row 0 environment matches pool 0');
+    assertEqual(res.previewRows?.[1]['environment'], 'PROD-2', 'Row 1 environment matches pool 1');
+
+    // 5. Master disable toggle (applySharedProperties = false)
+    const disabledOpts = {
+      ...queryOpts,
+      applySharedProperties: false,
+    };
+    const disabledRes = generatePostgresInsertQuery(disabledOpts);
+    assertEqual(disabledRes.sharedPropertiesApplied?.length, 0, 'No shared properties applied when disabled');
+    assertTrue(!disabledRes.sql.includes('-- Shared Properties Inherited'), 'No shared properties comment when disabled');
+  });
+
+  test('Database Insert Generator', 'Shared Properties Config Export & Import Roundtrip', () => {
+    const configWithOptions = {
+      tableName: 'enterprise_assets',
+      schema: 'inventory',
+      columns: [
+        {
+          id: 'col_1',
+          name: 'asset_id',
+          type: 'uuid' as const,
+          nullable: false,
+          hasDefault: true,
+          isPrimaryKey: true,
+          isUnique: true,
+          excludeFromInsert: false,
+          valueMode: 'generator' as const,
+          fixedValue: '',
+          valuePool: [],
+          generatorType: 'uuid' as const,
+        },
+        {
+          id: 'col_2',
+          name: 'tenant_id',
+          type: 'varchar' as const,
+          maxLength: 50,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator' as const,
+          fixedValue: '',
+          valuePool: [],
+          generatorType: 'company' as const,
+        },
+      ],
+      rowCount: 5,
+      insertStrategy: 'bulk_single_statement' as const,
+      batchSize: 50,
+      conflictStrategy: 'none' as const,
+      conflictTargetColumns: [],
+      conflictUpdateColumns: [],
+      returningClause: '*',
+      wrapInTransaction: true,
+      includeTypeCasts: false,
+      includeComments: true,
+      sharedProperties: {
+        tenant_id: {
+          id: 'sp_export_tenant',
+          columnName: 'tenant_id',
+          mode: 'constant' as const,
+          constantValue: 'tenant_corp_alpha',
+          active: true,
+          description: 'Enterprise partition code',
+          isCustom: true,
+          matchCaseInsensitive: true,
+        },
+        audit_tag: {
+          id: 'sp_export_tag',
+          columnName: 'audit_tag',
+          mode: 'expression' as const,
+          expression: 'CURRENT_DATE',
+          active: true,
+          description: 'Audit tracking date',
+          isCustom: true,
+          matchCaseInsensitive: true,
+        },
+      },
+      applySharedProperties: true,
+    };
+
+    // Export to JSON string
+    const jsonStr = createDbInsertConfigExport(configWithOptions);
+    assertTrue(jsonStr.includes('"tenant_corp_alpha"'), 'Export JSON includes shared constantValue');
+    assertTrue(jsonStr.includes('"audit_tag"'), 'Export JSON includes shared audit_tag');
+    assertTrue(jsonStr.includes('"applySharedProperties": true'), 'Export JSON includes applySharedProperties');
+
+    // Parse and restore config
+    const parseRes = validateAndParseDbInsertConfig(jsonStr);
+    assertTrue(parseRes.success, 'Configuration parsed successfully');
+    assertTrue(Boolean(parseRes.options?.sharedProperties), 'Restored sharedProperties dictionary');
+    assertEqual(
+      parseRes.options?.sharedProperties?.['tenant_id']?.constantValue,
+      'tenant_corp_alpha',
+      'Restored tenant_id constant value'
+    );
+    assertEqual(
+      parseRes.options?.sharedProperties?.['audit_tag']?.expression,
+      'CURRENT_DATE',
+      'Restored audit_tag expression'
+    );
+    assertEqual(parseRes.options?.applySharedProperties, true, 'Restored applySharedProperties boolean flag');
+  });
+
+  test('Database Insert Generator', 'Custom Grid Overrides Precedence over Shared Properties', () => {
+    const optsWithCustomGrid = {
+      tableName: 'devices',
+      schema: 'public',
+      columns: [
+        {
+          id: 'col_tenant',
+          name: 'tenant_id',
+          type: 'varchar' as const,
+          nullable: false,
+          hasDefault: false,
+          isPrimaryKey: false,
+          isUnique: false,
+          excludeFromInsert: false,
+          valueMode: 'generator' as const,
+          fixedValue: '',
+          valuePool: [],
+          generatorType: 'company' as const,
+        },
+      ],
+      rowCount: 3,
+      insertStrategy: 'bulk_single_statement' as const,
+      batchSize: 100,
+      conflictStrategy: 'none' as const,
+      conflictTargetColumns: [],
+      conflictUpdateColumns: [],
+      returningClause: '',
+      wrapInTransaction: false,
+      includeTypeCasts: false,
+      includeComments: false,
+      sharedProperties: {
+        tenant_id: {
+          id: 'sp_dev_tenant',
+          columnName: 'tenant_id',
+          mode: 'constant' as const,
+          constantValue: 'shared_default_tenant',
+          active: true,
+        },
+      },
+      applySharedProperties: true,
+      customGridRows: [
+        { tenant_id: 'OVERRIDDEN_IN_GRID_ROW_0' },
+        // Row 1 will use shared property
+        {},
+        { tenant_id: 'OVERRIDDEN_IN_GRID_ROW_2' },
+      ],
+    };
+
+    const res = generatePostgresInsertQuery(optsWithCustomGrid);
+    assertEqual(res.previewRows?.[0]['tenant_id'], 'OVERRIDDEN_IN_GRID_ROW_0', 'Row 0 cell overrides shared property');
+    assertEqual(res.previewRows?.[1]['tenant_id'], 'shared_default_tenant', 'Row 1 inherits shared property');
+    assertEqual(res.previewRows?.[2]['tenant_id'], 'OVERRIDDEN_IN_GRID_ROW_2', 'Row 2 cell overrides shared property');
   });
 
   // =========================================================================
@@ -5114,6 +5443,128 @@ CREATE TABLE "size_test" (
     });
     assertTrue(sqlServerSql.sql.includes('SET IDENTITY_INSERT [users] ON;'), 'SET IDENTITY_INSERT ON generated');
     assertTrue(sqlServerSql.sql.includes('SET IDENTITY_INSERT [users] OFF;'), 'SET IDENTITY_INSERT OFF generated');
+  });
+
+  test('Database Row Copy Tool', 'General Shared Properties Reusability, Precedence & Matching', () => {
+    const config: DbRowCopyConfig = {
+      id: 'shared_prop_test',
+      name: 'Shared Properties Test',
+      tableName: 'tenants_data',
+      columns: [
+        { id: '1', name: 'id', type: 'BIGINT', isPrimaryKey: true, isNullable: false },
+        { id: '2', name: 'tenant_id', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+        { id: '3', name: 'status', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+        { id: '4', name: 'created_by', type: 'VARCHAR', isPrimaryKey: false, isNullable: false },
+        { id: '5', name: 'notes', type: 'TEXT', isPrimaryKey: false, isNullable: true },
+      ],
+      lookupColumn: 'id',
+      lookupValue: '101',
+      lookupOperator: '=',
+      // Table-specific explicit overrides (status is explicitly overridden)
+      overrides: {
+        status: { columnName: 'status', mode: 'constant', constantValue: 'SPECIAL_OVERRIDE', active: true },
+      },
+      // Shared generic properties configured in separate tab
+      sharedProperties: {
+        tenant_id: {
+          id: 'sp_tenant',
+          columnName: 'tenant_id',
+          mode: 'constant',
+          constantValue: 'SHARED_TENANT_99',
+          active: true,
+          isCustom: true,
+        },
+        status: {
+          id: 'sp_status',
+          columnName: 'status',
+          mode: 'constant',
+          constantValue: 'GENERIC_DRAFT',
+          active: true,
+          isCustom: false,
+        },
+        created_by: {
+          id: 'sp_created_by',
+          columnName: 'CREATED_BY', // Test case-insensitivity
+          mode: 'constant',
+          constantValue: 'shared_clone_service',
+          active: true,
+          isCustom: true,
+          matchCaseInsensitive: true,
+        },
+        // Custom property not in this table
+        organization_code: {
+          id: 'sp_org',
+          columnName: 'organization_code',
+          mode: 'constant',
+          constantValue: 'CORP_HQ',
+          active: true,
+          isCustom: true,
+        },
+      },
+      options: {
+        dialect: 'postgres',
+        useTransaction: false,
+        rollbackOnly: false,
+        includeReturning: false,
+        copyCount: 1,
+        strategy: 'insert_select',
+        generatePythonScript: false,
+        applySharedProperties: true,
+      },
+    };
+
+    // 1. Generate SQL with Shared Properties enabled
+    const res = generateRowCopySql(config);
+
+    // tenant_id should use shared property value
+    assertTrue(res.sql.includes("'SHARED_TENANT_99'"), 'tenant_id matches shared property value');
+
+    // created_by should use shared property value via case-insensitive match
+    assertTrue(res.sql.includes("'shared_clone_service'"), 'created_by matches shared property case-insensitively');
+
+    // status should use table-specific override (SPECIAL_OVERRIDE), NOT generic draft
+    assertTrue(res.sql.includes("'SPECIAL_OVERRIDE'"), 'Table explicit override takes precedence over shared property');
+    assertTrue(!res.sql.includes("'GENERIC_DRAFT'"), 'Generic status was overridden by table-specific override');
+
+    // notes is neither in table overrides nor shared properties -> copied verbatim
+    assertTrue(res.sql.includes('notes'), 'notes is copied verbatim');
+
+    // Check summary metrics
+    assertEqual(res.copySummary.sharedApplied, 2, '2 columns applied from shared generic properties (tenant_id, created_by)');
+    assertEqual(res.copySummary.overridden, 3, 'Total 3 overridden (1 explicit + 2 shared)');
+
+    // 2. Test disabling applySharedProperties
+    const disabledRes = generateRowCopySql({
+      ...config,
+      options: { ...config.options, applySharedProperties: false },
+    });
+    assertTrue(!disabledRes.sql.includes("'SHARED_TENANT_99'"), 'Shared property not applied when applySharedProperties is false');
+    assertEqual(disabledRes.copySummary.sharedApplied, 0, '0 columns from shared properties when disabled');
+  });
+
+  test('Database Row Copy Tool', 'General Shared Properties Live Diff Simulation & JSON Export/Import', () => {
+    const config = DB_ROW_COPY_PRESETS[0]; // orders preset with sharedProperties
+    assertTrue(Boolean(config.sharedProperties), 'orders preset has sharedProperties configured');
+
+    const sample = config.sampleSourceRow!;
+    const { clonedRow, diffs } = simulateRowCopy(config, sample);
+
+    // In orders preset, tenant_id is in sharedProperties
+    if (diffs.tenant_id) {
+      assertTrue(diffs.tenant_id.isShared === true, 'tenant_id is marked as isShared: true in simulation diffs');
+    }
+
+    // JSON Export / Import round-trip preserves sharedProperties
+    const serialized = JSON.stringify(config, null, 2);
+    assertTrue(serialized.includes('"sharedProperties"'), 'Serialized JSON contains sharedProperties');
+
+    const deserialized: DbRowCopyConfig = JSON.parse(serialized);
+    assertTrue(Boolean(deserialized.sharedProperties), 'Deserialized config has sharedProperties');
+    assertEqual(
+      Object.keys(deserialized.sharedProperties || {}).length,
+      Object.keys(config.sharedProperties || {}).length,
+      'Shared properties count preserved across export/import'
+    );
   });
 
   const durationMs = Math.round((performance.now() - startTime) * 100) / 100;

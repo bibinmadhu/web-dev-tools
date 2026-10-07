@@ -17,19 +17,23 @@ import {
   Layers,
   ArrowRight,
   Filter,
+  SlidersHorizontal,
 } from 'lucide-react';
 import {
   DbRowCopyConfig,
   TableColumn,
   ColumnOverride,
+  SharedPropertyRule,
   RowCopyOptions,
   DB_ROW_COPY_PRESETS,
   generateRowCopySql,
   simulateRowCopy,
+  findMatchingSharedProperty,
 } from '../../../utils/dbRowCopyGenerator';
 import { TableDefinitionEditor } from './TableDefinitionEditor';
 import { RowLookupSelector } from './RowLookupSelector';
 import { ColumnOverridesEditor } from './ColumnOverridesEditor';
+import { SharedPropertiesEditor } from './SharedPropertiesEditor';
 import { SqlOutputPreview } from './SqlOutputPreview';
 import { RowDiffPreviewGrid } from './RowDiffPreviewGrid';
 import { ConfigImportExportModal } from './ConfigImportExportModal';
@@ -59,7 +63,7 @@ export const DbRowCopyTool: React.FC<DbRowCopyToolProps> = ({
     return DB_ROW_COPY_PRESETS[0];
   });
 
-  const [activeTab, setActiveTab] = useState<'builder' | 'diff' | 'sql'>('builder');
+  const [activeTab, setActiveTab] = useState<'builder' | 'shared' | 'diff' | 'sql'>('builder');
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
 
   // Persist current config to localStorage
@@ -73,6 +77,11 @@ export const DbRowCopyTool: React.FC<DbRowCopyToolProps> = ({
   const sqlResult = useMemo(() => {
     return generateRowCopySql(config);
   }, [config]);
+
+  // Count active shared rules for badge
+  const activeSharedCount = useMemo(() => {
+    return (Object.values(config.sharedProperties || {}) as SharedPropertyRule[]).filter((r) => Boolean(r && r.active)).length;
+  }, [config.sharedProperties]);
 
   // Handlers for updating configuration state
   const handleUpdateTableName = (tableName: string) => {
@@ -135,6 +144,71 @@ export const DbRowCopyTool: React.FC<DbRowCopyToolProps> = ({
 
   const handleBatchApplyOverrides = (newOverrides: Record<string, ColumnOverride>) => {
     setConfig((prev) => ({ ...prev, overrides: newOverrides }));
+  };
+
+  // Shared Properties handlers
+  const handleUpdateSharedProperty = (key: string, rule: Partial<SharedPropertyRule> | null) => {
+    setConfig((prev) => {
+      const nextShared = { ...(prev.sharedProperties || {}) };
+      if (!rule) {
+        delete nextShared[key];
+      } else {
+        nextShared[key] = {
+          ...(nextShared[key] || {
+            id: `sp_${key}_${Date.now()}`,
+            columnName: key,
+            mode: 'constant',
+            active: true,
+            isCustom: true,
+            matchCaseInsensitive: true,
+          }),
+          ...rule,
+        };
+      }
+      return {
+        ...prev,
+        sharedProperties: nextShared,
+      };
+    });
+  };
+
+  const handleBatchUpdateSharedProperties = (rules: Record<string, SharedPropertyRule>) => {
+    setConfig((prev) => ({
+      ...prev,
+      sharedProperties: rules,
+    }));
+  };
+
+  // Bake all matching shared rules into table-specific explicit overrides
+  const handleApplySharedToTableOverrides = () => {
+    setConfig((prev) => {
+      const nextOverrides = { ...prev.overrides };
+      const shared = prev.sharedProperties || {};
+      let appliedCount = 0;
+
+      prev.columns.forEach((col) => {
+        const match = findMatchingSharedProperty(col.name, shared);
+        if (match && match.active) {
+          nextOverrides[col.name] = {
+            columnName: col.name,
+            mode: match.mode,
+            constantValue: match.constantValue,
+            expression: match.expression,
+            prefix: match.prefix,
+            suffix: match.suffix,
+            sequenceStep: match.sequenceStep,
+            randomType: match.randomType,
+            active: true,
+          };
+          appliedCount++;
+        }
+      });
+
+      return {
+        ...prev,
+        overrides: nextOverrides,
+      };
+    });
   };
 
   const handleUpdateOptions = (opts: Partial<RowCopyOptions>) => {
@@ -220,6 +294,24 @@ export const DbRowCopyTool: React.FC<DbRowCopyToolProps> = ({
 
           <button
             type="button"
+            onClick={() => setActiveTab('shared')}
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              activeTab === 'shared'
+                ? 'bg-white dark:bg-slate-800 text-purple-700 dark:text-purple-300 shadow-xs'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+            }`}
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-purple-500" />
+            <span>Shared Properties</span>
+            {activeSharedCount > 0 && (
+              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 font-bold">
+                {activeSharedCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveTab('diff')}
             className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
               activeTab === 'diff'
@@ -227,7 +319,7 @@ export const DbRowCopyTool: React.FC<DbRowCopyToolProps> = ({
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
             }`}
           >
-            <FileSpreadsheet className="w-3.5 h-3.5 text-purple-500" />
+            <FileSpreadsheet className="w-3.5 h-3.5 text-pink-500" />
             <span>Live Row Diff Simulation</span>
           </button>
 
@@ -285,6 +377,7 @@ export const DbRowCopyTool: React.FC<DbRowCopyToolProps> = ({
               <ColumnOverridesEditor
                 columns={config.columns}
                 overrides={config.overrides}
+                sharedProperties={config.sharedProperties}
                 onUpdateOverride={handleUpdateOverride}
                 onBatchApplyOverrides={handleBatchApplyOverrides}
               />
@@ -298,6 +391,19 @@ export const DbRowCopyTool: React.FC<DbRowCopyToolProps> = ({
             onUpdateOptions={handleUpdateOptions}
           />
         </div>
+      )}
+
+      {/* TAB 2: SHARED GENERIC PROPERTIES */}
+      {activeTab === 'shared' && (
+        <SharedPropertiesEditor
+          columns={config.columns}
+          sharedProperties={config.sharedProperties || {}}
+          options={config.options}
+          onUpdateSharedProperty={handleUpdateSharedProperty}
+          onBatchUpdateSharedProperties={handleBatchUpdateSharedProperties}
+          onUpdateOptions={handleUpdateOptions}
+          onApplyToTableOverrides={handleApplySharedToTableOverrides}
+        />
       )}
 
       {/* TAB 2: LIVE ROW DIFF SIMULATION */}

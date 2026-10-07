@@ -64,7 +64,10 @@ export const DbInsertConfigModal: React.FC<DbInsertConfigModalProps> = ({
       return;
     }
 
-    setValidationSuccess(`Configuration valid! Ready to load table "${result.options.tableName}" (${result.options.columns.length} columns).`);
+    const sharedCount = Object.keys(result.options.sharedProperties || {}).length;
+    setValidationSuccess(
+      `Configuration valid! Ready to load table "${result.options.tableName}" (${result.options.columns.length} columns${sharedCount > 0 ? `, ${sharedCount} shared properties` : ''}).`
+    );
     setTimeout(() => {
       onApplyConfig(result.options!);
       onClose();
@@ -82,7 +85,10 @@ export const DbInsertConfigModal: React.FC<DbInsertConfigModalProps> = ({
         setImportJsonText(text);
         const result = validateAndParseDbInsertConfig(text);
         if (result.success && result.options) {
-          setValidationSuccess(`File parsed! Found table "${result.options.tableName}" with ${result.options.columns.length} columns.`);
+          const sharedCount = Object.keys(result.options.sharedProperties || {}).length;
+          setValidationSuccess(
+            `File parsed! Found table "${result.options.tableName}" with ${result.options.columns.length} columns${sharedCount > 0 ? ` and ${sharedCount} shared properties` : ''}.`
+          );
           setValidationError(null);
         } else {
           setValidationError(result.error || 'Invalid configuration file.');
@@ -155,7 +161,7 @@ export const DbInsertConfigModal: React.FC<DbInsertConfigModalProps> = ({
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-xs text-slate-500 dark:text-slate-400 font-mono">
-                  Schema: {currentOptions.schema || 'public'}.{currentOptions.tableName} ({currentOptions.columns.length} columns)
+                  Schema: {currentOptions.schema || 'public'}.{currentOptions.tableName} ({currentOptions.columns.length} columns, {Object.keys(currentOptions.sharedProperties || {}).length} shared properties)
                 </span>
                 <div className="flex items-center gap-2">
                   <button

@@ -208,6 +208,11 @@ export const ConfigImportExportModal: React.FC<ConfigImportExportModalProps> = (
                     </span>
                     <span className="text-[10px] font-mono text-slate-400">
                       {preset.tableName} · {preset.columns.length} cols
+                      {preset.sharedProperties && Object.keys(preset.sharedProperties).length > 0 && (
+                        <span className="text-purple-600 dark:text-purple-400">
+                          {' '}· {Object.keys(preset.sharedProperties).length} shared
+                        </span>
+                      )}
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
@@ -224,7 +229,7 @@ export const ConfigImportExportModal: React.FC<ConfigImportExportModalProps> = (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Complete JSON serialization containing table schemas, lookup columns, column overrides, and options.
+                Complete JSON serialization containing table schemas, lookup columns, column overrides, general shared properties, and options.
               </p>
               <div className="flex items-center gap-2">
                 <button

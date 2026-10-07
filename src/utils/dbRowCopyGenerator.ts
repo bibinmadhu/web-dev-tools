@@ -78,6 +78,22 @@ export interface ColumnOverride {
   active: boolean;
 }
 
+export interface SharedPropertyRule {
+  id: string;
+  columnName: string; // The property / column name to match (e.g. 'created_by', 'tenant_id', 'status', 'updated_at', etc.)
+  mode: OverrideMode; // 'constant' | 'expression' | 'prefix_suffix' | 'sequence_increment' | 'mock_random' | 'null' | 'exclude'
+  constantValue?: string;
+  expression?: string;
+  prefix?: string;
+  suffix?: string;
+  sequenceStep?: number;
+  randomType?: RandomMockType;
+  active: boolean;
+  description?: string; // Optional user note / description e.g. "Sets tenant to current workspace"
+  isCustom?: boolean; // true if custom-added, false if populated from schema
+  matchCaseInsensitive?: boolean; // default true
+}
+
 export interface RowCopyOptions {
   dialect: SqlDialect;
   useTransaction: boolean;
@@ -89,6 +105,7 @@ export interface RowCopyOptions {
   generatePythonScript: boolean;
   setIdentityInsert?: boolean; // SQL Server specific
   identityStrategy?: IdentityHandlingStrategy;
+  applySharedProperties?: boolean; // default true: automatically inherit shared properties if column matches and no explicit table override exists
 }
 
 export interface DbRowCopyConfig {
@@ -102,6 +119,7 @@ export interface DbRowCopyConfig {
   lookupValue: string;
   lookupOperator: '=' | 'IN' | 'LIKE';
   overrides: Record<string, ColumnOverride>;
+  sharedProperties?: Record<string, SharedPropertyRule>;
   options: RowCopyOptions;
   sampleSourceRow?: Record<string, any>;
   createdAt?: string;
@@ -115,6 +133,8 @@ export interface GeneratedSqlResult {
     totalColumns: number;
     copiedVerbatim: number;
     overridden: number;
+    sharedApplied?: number;
+    sharedColumns?: string[];
     excluded: number;
     insertedColumns: string[];
     excludedColumns: string[];
@@ -607,6 +627,135 @@ export function escapeIdentifier(ident: string, dialect: SqlDialect): string {
   }
 }
 
+export interface RowDiffItem {
+  original: any;
+  copied: any;
+  status: 'identical' | 'overridden' | 'excluded';
+  isShared?: boolean;
+  sharedRuleName?: string;
+}
+
+export const ENTERPRISE_SHARED_PROPERTY_TEMPLATES: SharedPropertyRule[] = [
+  {
+    id: 'shared_template_tenant_id',
+    columnName: 'tenant_id',
+    mode: 'constant',
+    constantValue: 'tenant_demo_101',
+    active: true,
+    description: 'Multi-tenant partition key (Enterprise Isolation)',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'shared_template_created_by',
+    columnName: 'created_by',
+    mode: 'constant',
+    constantValue: 'system_clone_job',
+    active: true,
+    description: 'Audit trail user identity for cloned records',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'shared_template_updated_by',
+    columnName: 'updated_by',
+    mode: 'constant',
+    constantValue: 'system_clone_job',
+    active: true,
+    description: 'Last modifier audit user',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'shared_template_updated_at',
+    columnName: 'updated_at',
+    mode: 'expression',
+    expression: 'CURRENT_TIMESTAMP',
+    active: true,
+    description: 'Touch timestamp for updated/cloned records',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'shared_template_created_at',
+    columnName: 'created_at',
+    mode: 'expression',
+    expression: 'CURRENT_TIMESTAMP',
+    active: true,
+    description: 'Touch timestamp for new records',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'shared_template_status',
+    columnName: 'status',
+    mode: 'constant',
+    constantValue: 'DRAFT',
+    active: true,
+    description: 'Initial lifecycle status for cloned entities',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'shared_template_is_active',
+    columnName: 'is_active',
+    mode: 'constant',
+    constantValue: 'false',
+    active: true,
+    description: 'Keep clones inactive until verified',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'shared_template_version',
+    columnName: 'version',
+    mode: 'constant',
+    constantValue: '1',
+    active: true,
+    description: 'Reset optimistic locking version counter',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+  {
+    id: 'shared_template_is_copy',
+    columnName: 'is_copy',
+    mode: 'constant',
+    constantValue: 'true',
+    active: true,
+    description: 'Flag explicitly marking entity as duplicated',
+    isCustom: true,
+    matchCaseInsensitive: true,
+  },
+];
+
+/**
+ * Finds an active matching shared property rule for a column name.
+ * Checks exact match first, then case-insensitive matching if enabled.
+ */
+export function findMatchingSharedProperty(
+  colName: string,
+  sharedProperties?: Record<string, SharedPropertyRule>,
+  matchCaseInsensitive: boolean = true
+): SharedPropertyRule | undefined {
+  if (!sharedProperties || !colName) return undefined;
+
+  // 1. Exact match
+  const exact = sharedProperties[colName];
+  if (exact && exact.active) return exact;
+
+  // 2. Case-insensitive match if enabled
+  if (matchCaseInsensitive) {
+    const lowerName = colName.toLowerCase();
+    for (const rule of Object.values(sharedProperties)) {
+      if (rule.active && rule.columnName.toLowerCase() === lowerName) {
+        return rule;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 /**
  * Formats full table name with optional schema
  */
@@ -671,16 +820,43 @@ export function generateRowCopySql(config: DbRowCopyConfig): GeneratedSqlResult 
   const excludedCols: string[] = [];
   const autoIdentityCols: { col: TableColumn; definition: string }[] = [];
   const identityStrategy = options.identityStrategy || 'auto_exclude';
+  const applyShared = options.applySharedProperties !== false;
+  const sharedColsApplied: string[] = [];
+  const sharedNotes: string[] = [];
   let verbatimCount = 0;
   let overriddenCount = 0;
 
   columns.forEach((col) => {
-    const override = overrides[col.name];
+    const explicitOverride = overrides[col.name];
     const isColIdentity = Boolean(col.isIdentity || (col.identityType && col.identityType !== 'none'));
-    const hasExplicitActiveOverride = Boolean(override && override.active && override.mode !== 'exclude');
+    const hasExplicitActiveOverride = Boolean(explicitOverride && explicitOverride.active && explicitOverride.mode !== 'exclude');
+
+    // Check shared property match if no explicit active override
+    const matchedShared = !hasExplicitActiveOverride && applyShared
+      ? findMatchingSharedProperty(col.name, config.sharedProperties)
+      : undefined;
+
+    // Effective override
+    const effectiveOverride: ColumnOverride | undefined = explicitOverride && explicitOverride.active
+      ? explicitOverride
+      : (matchedShared && matchedShared.active
+        ? {
+            columnName: col.name,
+            mode: matchedShared.mode,
+            constantValue: matchedShared.constantValue,
+            expression: matchedShared.expression,
+            prefix: matchedShared.prefix,
+            suffix: matchedShared.suffix,
+            sequenceStep: matchedShared.sequenceStep,
+            randomType: matchedShared.randomType,
+            active: true,
+          }
+        : undefined);
+
+    const hasAnyActiveOverride = Boolean(effectiveOverride && effectiveOverride.active && effectiveOverride.mode !== 'exclude');
 
     // Handle auto-generated identity column when not explicitly overridden with a custom value
-    if (isColIdentity && !hasExplicitActiveOverride && identityStrategy !== 'include_verbatim') {
+    if (isColIdentity && !hasAnyActiveOverride && identityStrategy !== 'include_verbatim') {
       excludedCols.push(col.name);
       autoIdentityCols.push({
         col,
@@ -689,15 +865,22 @@ export function generateRowCopySql(config: DbRowCopyConfig): GeneratedSqlResult 
       return;
     }
 
-    const expr = buildColumnSqlExpression(col, override, dialect);
+    const expr = buildColumnSqlExpression(col, effectiveOverride, dialect);
 
     if (expr === null) {
       excludedCols.push(col.name);
     } else {
       insertCols.push(escapeIdentifier(col.name, dialect));
       selectExprs.push(expr);
-      if (override && override.active && override.mode !== 'exclude') {
+      if (explicitOverride && explicitOverride.active && explicitOverride.mode !== 'exclude') {
         overriddenCount++;
+      } else if (matchedShared && matchedShared.active && matchedShared.mode !== 'exclude') {
+        overriddenCount++;
+        sharedColsApplied.push(col.name);
+        const valDesc = matchedShared.mode === 'constant'
+          ? `'${matchedShared.constantValue}'`
+          : (matchedShared.expression || matchedShared.mode);
+        sharedNotes.push(`${col.name} (${valDesc})`);
       } else {
         verbatimCount++;
       }
@@ -755,7 +938,10 @@ export function generateRowCopySql(config: DbRowCopyConfig): GeneratedSqlResult 
   lines.push(`-- Database Row Copy Script`);
   lines.push(`-- Table: ${schemaName ? `${schemaName}.${tableName}` : tableName}`);
   lines.push(`-- Source Lookup: ${effectiveLookupCol.name} (${whereClause})`);
-  lines.push(`-- Copied Columns: ${insertCols.length} | Overridden: ${overriddenCount} | Excluded: ${excludedCols.length}`);
+  lines.push(`-- Copied Columns: ${insertCols.length} | Overridden: ${overriddenCount}${sharedColsApplied.length > 0 ? ` (Shared Rules: ${sharedColsApplied.length})` : ''} | Excluded: ${excludedCols.length}`);
+  if (sharedNotes.length > 0) {
+    lines.push(`-- Shared Generic Properties: ${sharedNotes.join(', ')}`);
+  }
   if (autoIdentityCols.length > 0) {
     autoIdentityCols.forEach((item) => {
       lines.push(`-- Auto-Gen Identity: Column "${item.col.name}" (${item.definition}) is omitted from INSERT`);
@@ -853,6 +1039,8 @@ export function generateRowCopySql(config: DbRowCopyConfig): GeneratedSqlResult 
       totalColumns: columns.length,
       copiedVerbatim: verbatimCount,
       overridden: overriddenCount,
+      sharedApplied: sharedColsApplied.length,
+      sharedColumns: sharedColsApplied,
       excluded: excludedCols.length,
       insertedColumns: insertCols,
       excludedColumns: excludedCols,
@@ -960,14 +1148,39 @@ export function simulateRowCopy(
   sourceRow: Record<string, any>
 ): {
   clonedRow: Record<string, any>;
-  diffs: Record<string, { original: any; copied: any; status: 'identical' | 'overridden' | 'excluded' }>;
+  diffs: Record<string, RowDiffItem>;
 } {
   const clonedRow: Record<string, any> = {};
-  const diffs: Record<string, { original: any; copied: any; status: 'identical' | 'overridden' | 'excluded' }> = {};
+  const diffs: Record<string, RowDiffItem> = {};
+  const applyShared = config.options.applySharedProperties !== false;
 
   config.columns.forEach((col) => {
     const origVal = sourceRow[col.name];
-    const override = config.overrides[col.name];
+    const explicitOverride = config.overrides[col.name];
+    const hasExplicitActive = Boolean(explicitOverride && explicitOverride.active);
+
+    const matchedShared = !hasExplicitActive && applyShared
+      ? findMatchingSharedProperty(col.name, config.sharedProperties)
+      : undefined;
+
+    const override = hasExplicitActive
+      ? explicitOverride
+      : (matchedShared && matchedShared.active
+        ? {
+            columnName: col.name,
+            mode: matchedShared.mode,
+            constantValue: matchedShared.constantValue,
+            expression: matchedShared.expression,
+            prefix: matchedShared.prefix,
+            suffix: matchedShared.suffix,
+            sequenceStep: matchedShared.sequenceStep,
+            randomType: matchedShared.randomType,
+            active: true,
+          }
+        : undefined);
+
+    const isShared = !hasExplicitActive && Boolean(matchedShared && matchedShared.active);
+    const sharedRuleName = isShared ? matchedShared?.columnName : undefined;
 
     if (!override || !override.active) {
       // Check if auto-generated identity column is auto-excluded
@@ -1000,6 +1213,8 @@ export function simulateRowCopy(
           original: origVal,
           copied: '<EXCLUDED / DB DEFAULT>',
           status: 'excluded',
+          isShared,
+          sharedRuleName,
         };
         break;
 
@@ -1009,6 +1224,8 @@ export function simulateRowCopy(
           original: origVal,
           copied: null,
           status: 'overridden',
+          isShared,
+          sharedRuleName,
         };
         break;
 
@@ -1018,6 +1235,8 @@ export function simulateRowCopy(
           original: origVal,
           copied: override.constantValue,
           status: 'overridden',
+          isShared,
+          sharedRuleName,
         };
         break;
 
@@ -1027,6 +1246,8 @@ export function simulateRowCopy(
           original: origVal,
           copied: override.expression || 'EXPR()',
           status: 'overridden',
+          isShared,
+          sharedRuleName,
         };
         break;
 
@@ -1038,6 +1259,8 @@ export function simulateRowCopy(
           original: origVal,
           copied: newVal,
           status: 'overridden',
+          isShared,
+          sharedRuleName,
         };
         break;
       }
@@ -1051,6 +1274,8 @@ export function simulateRowCopy(
           original: origVal,
           copied: newVal,
           status: 'overridden',
+          isShared,
+          sharedRuleName,
         };
         break;
       }
@@ -1071,6 +1296,8 @@ export function simulateRowCopy(
           original: origVal,
           copied: clonedRow[col.name],
           status: 'overridden',
+          isShared,
+          sharedRuleName,
         };
         break;
 
@@ -1080,6 +1307,8 @@ export function simulateRowCopy(
           original: origVal,
           copied: origVal,
           status: 'identical',
+          isShared,
+          sharedRuleName,
         };
     }
   });
@@ -1116,6 +1345,38 @@ export const DB_ROW_COPY_PRESETS: DbRowCopyConfig[] = [
       status: { columnName: 'status', mode: 'constant', constantValue: 'PENDING_APPROVAL', active: true },
       created_at: { columnName: 'created_at', mode: 'expression', expression: 'CURRENT_TIMESTAMP', active: true },
       notes: { columnName: 'notes', mode: 'prefix_suffix', prefix: '[CLONED FOR QA] ', active: true },
+    },
+    sharedProperties: {
+      tenant_id: {
+        id: 'sp_orders_tenant',
+        columnName: 'tenant_id',
+        mode: 'constant',
+        constantValue: 'tenant_demo_101',
+        active: true,
+        description: 'Multi-tenant organization partition',
+        isCustom: true,
+        matchCaseInsensitive: true,
+      },
+      currency: {
+        id: 'sp_orders_curr',
+        columnName: 'currency',
+        mode: 'constant',
+        constantValue: 'USD',
+        active: false,
+        description: 'Default transaction currency',
+        isCustom: false,
+        matchCaseInsensitive: true,
+      },
+      created_by: {
+        id: 'sp_orders_author',
+        columnName: 'created_by',
+        mode: 'constant',
+        constantValue: 'system_clone_job',
+        active: true,
+        description: 'Audit user for duplicated rows',
+        isCustom: true,
+        matchCaseInsensitive: true,
+      },
     },
     options: {
       dialect: 'postgres',
@@ -1304,6 +1565,38 @@ export const DB_ROW_COPY_PRESETS: DbRowCopyConfig[] = [
       account_number: { columnName: 'account_number', mode: 'prefix_suffix', suffix: '-CLONE', active: true },
       status: { columnName: 'status', mode: 'constant', constantValue: 'PENDING_VERIFICATION', active: true },
       created_at: { columnName: 'created_at', mode: 'expression', expression: 'CURRENT_TIMESTAMP', active: true },
+    },
+    sharedProperties: {
+      status: {
+        id: 'sp_ledger_status',
+        columnName: 'status',
+        mode: 'constant',
+        constantValue: 'PENDING_VERIFICATION',
+        active: true,
+        description: 'Audit status reset for ledger cloning',
+        isCustom: false,
+        matchCaseInsensitive: true,
+      },
+      tenant_id: {
+        id: 'sp_ledger_tenant',
+        columnName: 'tenant_id',
+        mode: 'constant',
+        constantValue: 'corp_finance_01',
+        active: true,
+        description: 'Enterprise finance tenant',
+        isCustom: true,
+        matchCaseInsensitive: true,
+      },
+      currency: {
+        id: 'sp_ledger_curr',
+        columnName: 'currency',
+        mode: 'constant',
+        constantValue: 'USD',
+        active: true,
+        description: 'Default financial ledger currency',
+        isCustom: false,
+        matchCaseInsensitive: true,
+      },
     },
     options: {
       dialect: 'postgres',

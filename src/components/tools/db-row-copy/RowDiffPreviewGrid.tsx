@@ -95,6 +95,7 @@ export const RowDiffPreviewGrid: React.FC<RowDiffPreviewGridProps> = ({
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60">
             {config.columns.map((col) => {
               const diff = diffs[col.name];
+              const isShared = Boolean(diff?.isShared);
               const isOverridden = diff?.status === 'overridden';
               const isExcluded = diff?.status === 'excluded';
               const isLookup = col.name === config.lookupColumn;
@@ -103,7 +104,9 @@ export const RowDiffPreviewGrid: React.FC<RowDiffPreviewGridProps> = ({
                 <tr
                   key={col.id}
                   className={`transition-colors ${
-                    isOverridden
+                    isShared
+                      ? 'bg-purple-50/20 dark:bg-purple-950/10'
+                      : isOverridden
                       ? 'bg-indigo-50/20 dark:bg-indigo-950/10'
                       : isExcluded
                       ? 'bg-amber-50/20 dark:bg-amber-950/10'
@@ -125,6 +128,11 @@ export const RowDiffPreviewGrid: React.FC<RowDiffPreviewGridProps> = ({
                       {isLookup && (
                         <span className="text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 px-1 rounded">
                           lookup
+                        </span>
+                      )}
+                      {isShared && (
+                        <span className="text-[10px] text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-500/10 px-1 py-0.2 rounded" title="Inherited from Shared Properties">
+                          shared
                         </span>
                       )}
                     </div>
@@ -167,6 +175,10 @@ export const RowDiffPreviewGrid: React.FC<RowDiffPreviewGridProps> = ({
                           Omitted (Auto Default)
                         </span>
                       )
+                    ) : isShared ? (
+                      <span className="font-bold text-purple-600 dark:text-purple-400 truncate block max-w-xs" title={String(diff?.copied)}>
+                        {diff?.copied !== null ? String(diff?.copied) : 'NULL'}
+                      </span>
                     ) : isOverridden ? (
                       <span className="font-bold text-indigo-600 dark:text-indigo-400 truncate block max-w-xs" title={String(diff?.copied)}>
                         {diff?.copied !== null ? String(diff?.copied) : 'NULL'}
@@ -190,6 +202,14 @@ export const RowDiffPreviewGrid: React.FC<RowDiffPreviewGridProps> = ({
                           Excluded
                         </span>
                       )
+                    ) : isShared ? (
+                      <span
+                        className="text-[10px] text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-950/40 px-1.5 py-0.5 rounded font-sans font-medium border border-purple-200 dark:border-purple-800/60 inline-flex items-center gap-1"
+                        title={`Inherited from shared property: ${diff?.sharedRuleName || col.name}`}
+                      >
+                        <Sparkles className="w-2.5 h-2.5 text-purple-500" />
+                        <span>Shared</span>
+                      </span>
                     ) : isOverridden ? (
                       <span className="text-[10px] text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/10 px-1.5 py-0.5 rounded font-sans">
                         {config.overrides[col.name]?.mode}
