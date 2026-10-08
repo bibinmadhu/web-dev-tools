@@ -36,6 +36,11 @@ import {
   SelectStrategy,
   MatchColumn,
   SelectColumn,
+  TableColumn,
+  SchemaUseCase,
+  SCHEMA_DDL_TEMPLATES,
+  parseCreateTableDdl,
+  getColumnNamesForUseCase,
   SelectQueryOptions,
   DbSelectConfig,
   generatePostgresSelectQuery,
@@ -48,6 +53,8 @@ import {
   prefixAliasToOrderBy,
 } from '../../utils/dbSelectQueryGenerator';
 import { DbSelectConfigModal } from './DbSelectConfigModal';
+import { DbSelectSchemaImportModal } from './db-select-query-generator/DbSelectSchemaImportModal';
+import { DbSelectSchemaColumnSelector } from './db-select-query-generator/DbSelectSchemaColumnSelector';
 
 interface DbSelectQueryGeneratorToolProps {
   isFullScreen?: boolean;
@@ -58,7 +65,26 @@ export const DbSelectQueryGeneratorTool: React.FC<DbSelectQueryGeneratorToolProp
   isFullScreen = false,
   onToggleFullScreen,
 }) => {
-  // Target Table & Identity
+  // Target Table & Schema DDL Identity
+  const defaultSchemaParsed = useMemo(() => {
+    return parseCreateTableDdl(SCHEMA_DDL_TEMPLATES[1].ddl);
+  }, []);
+
+  const [schemaDdl, setSchemaDdl] = useState<string>(SCHEMA_DDL_TEMPLATES[1].ddl);
+  const [schemaColumns, setSchemaColumns] = useState<TableColumn[]>(defaultSchemaParsed.columns);
+  const [schemaName, setSchemaName] = useState<string>(defaultSchemaParsed.schema || 'public');
+  const [isSchemaImportModalOpen, setIsSchemaImportModalOpen] = useState<boolean>(false);
+  const [selectedUseCase, setSelectedUseCase] = useState<string>('all');
+  const [projectionMode, setProjectionMode] = useState<'schema' | 'custom'>('schema');
+  const [customUseCases, setCustomUseCases] = useState<SchemaUseCase[]>(() => {
+    try {
+      const saved = localStorage.getItem('devhub_db_select_custom_use_cases');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [tableName, setTableName] = useState<string>('users');
   const [useTableAlias, setUseTableAlias] = useState<boolean>(true);
   const [tableAlias, setTableAlias] = useState<string>('t');
@@ -131,6 +157,18 @@ export const DbSelectQueryGeneratorTool: React.FC<DbSelectQueryGeneratorToolProp
 
   const handleApplyConfig = (config: DbSelectConfig) => {
     setTableName(config.tableName);
+    if (config.schemaDdl) {
+      setSchemaDdl(config.schemaDdl);
+    }
+    if (config.schemaColumns && config.schemaColumns.length > 0) {
+      setSchemaColumns(config.schemaColumns);
+    }
+    if (config.selectedUseCase) {
+      setSelectedUseCase(config.selectedUseCase);
+    }
+    if (config.customUseCases && config.customUseCases.length > 0) {
+      setCustomUseCases(config.customUseCases);
+    }
     if (config.useTableAlias !== undefined) {
       setUseTableAlias(config.useTableAlias);
     } else if (config.tableAlias !== undefined) {
@@ -161,6 +199,76 @@ export const DbSelectQueryGeneratorTool: React.FC<DbSelectQueryGeneratorToolProp
       setShowNullForMissing(!!config.showNullForMissing);
     }
     setSelectedPresetId('custom-imported');
+  };
+
+  // SCHEMA MANAGEMENT HANDLERS
+  const handleApplySchema = (data: {
+    ddl: string;
+    tableName: string;
+    schema: string;
+    columns: TableColumn[];
+    primaryKeys: string[];
+  }) => {
+    setSchemaDdl(data.ddl);
+    setTableName(data.tableName);
+    setSchemaName(data.schema);
+    setSchemaColumns(data.columns);
+    setSelectedUseCase('all');
+    setSelectAllColumns(false);
+
+    // Populate select columns from parsed schema
+    const newSelectCols: SelectColumn[] = data.columns.map((col) => ({
+      id: `sel-${col.name}-${Date.now()}`,
+      name: col.name,
+      type: col.type,
+      isPrimaryKey: col.isPrimaryKey,
+      aggregate: 'NONE',
+    }));
+    setSelectColumns(newSelectCols);
+
+    // Sync projection clause
+    const prefix = useTableAlias && tableAlias ? `${tableAlias}.` : '';
+    setCustomSelectClause(data.columns.map((c) => `${prefix}${c.name}`).join(', '));
+  };
+
+  const handleSaveCustomUseCase = (newCase: SchemaUseCase) => {
+    setCustomUseCases((prev) => {
+      const updated = [...prev.filter((c) => c.id !== newCase.id), newCase];
+      try {
+        localStorage.setItem('devhub_db_select_custom_use_cases', JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
+  };
+
+  const handleDeleteCustomUseCase = (id: string) => {
+    setCustomUseCases((prev) => {
+      const updated = prev.filter((c) => c.id !== id);
+      try {
+        localStorage.setItem('devhub_db_select_custom_use_cases', JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
+  };
+
+  const handleAddMatchFilterFromSchema = (col: TableColumn) => {
+    const exists = matchColumns.some((m) => m.name.toLowerCase() === col.name.toLowerCase());
+    if (exists) {
+      return;
+    }
+    const newCol: MatchColumn = {
+      id: `match-${col.name}-${Date.now()}`,
+      name: col.name,
+      type: col.type,
+      valueMode: 'list',
+      singleValue: '',
+      values: Array.from({ length: Math.max(1, maxRowCount) }).map(() => ''),
+    };
+    setMatchColumns([...matchColumns, newCol]);
   };
 
   // Load preset handler
@@ -586,6 +694,21 @@ export const DbSelectQueryGeneratorTool: React.FC<DbSelectQueryGeneratorToolProp
                     <span className="text-[10px] text-amber-400 font-mono italic">no alias</span>
                   )}
                 </div>
+
+                {/* Schema DDL Trigger Button */}
+                <button
+                  onClick={() => setIsSchemaImportModalOpen(true)}
+                  className="px-2.5 py-1 rounded bg-indigo-950/70 hover:bg-indigo-900 border border-indigo-750 text-indigo-200 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-xs"
+                  title="Import or update table schema (CREATE TABLE DDL)"
+                >
+                  <Database className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Schema DDL</span>
+                  {schemaColumns.length > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-indigo-800 text-[10px] font-mono font-semibold">
+                      {schemaColumns.length} cols
+                    </span>
+                  )}
+                </button>
               </div>
 
               {/* Input Mode Selector */}
@@ -809,7 +932,17 @@ export const DbSelectQueryGeneratorTool: React.FC<DbSelectQueryGeneratorToolProp
                             <input
                               type="text"
                               value={col.name}
-                              onChange={(e) => handleUpdateMatchColumn(col.id, { name: e.target.value })}
+                              onChange={(e) => {
+                                const newName = e.target.value;
+                                const matchingCol = schemaColumns.find(
+                                  (sc) => sc.name.toLowerCase() === newName.toLowerCase()
+                                );
+                                handleUpdateMatchColumn(col.id, {
+                                  name: newName,
+                                  type: matchingCol ? matchingCol.type : col.type,
+                                });
+                              }}
+                              list="schema-columns-datalist"
                               placeholder="column_name"
                               className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-amber-300 font-mono flex-1 focus:outline-none focus:border-amber-500"
                             />
@@ -915,87 +1048,40 @@ export const DbSelectQueryGeneratorTool: React.FC<DbSelectQueryGeneratorToolProp
                     );
                   })}
                 </div>
-              </div>
 
-              {/* CARD 2: SELECT PROJECTION / COLUMNS TO RETRIEVE */}
-              <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-3 space-y-2.5">
-                <div className="flex items-center justify-between pb-1 border-b border-slate-800/80">
-                  <div className="flex items-center gap-2">
-                    <Columns className="w-4 h-4 text-emerald-400" />
-                    <span className="text-xs font-semibold text-slate-200">
-                      Columns to Select (Projection)
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {/* Toggle SELECT * */}
-                    <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={selectAllColumns}
-                        onChange={(e) => setSelectAllColumns(e.target.checked)}
-                        className="rounded bg-slate-950 border-slate-700 text-emerald-500 focus:ring-0"
-                      />
-                      <span>SELECT * (All Columns)</span>
-                    </label>
-                  </div>
-                </div>
-
-                {!selectAllColumns && (
-                  <div className="space-y-2">
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-[11px] font-medium text-slate-400">
-                          Custom SELECT expression or comma-separated columns:
-                        </label>
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() =>
-                              setCustomSelectClause(
-                                useTableAlias
-                                  ? `${tableAlias || 't'}.id, ${tableAlias || 't'}.username, ${tableAlias || 't'}.email, ${tableAlias || 't'}.status`
-                                  : 'id, username, email, status'
-                              )
-                            }
-                            className="text-[10px] text-slate-400 hover:text-emerald-400 px-1.5 py-0.5 rounded bg-slate-800 cursor-pointer"
-                          >
-                            User profile
-                          </button>
-                          <button
-                            onClick={() =>
-                              setCustomSelectClause(
-                                useTableAlias
-                                  ? `${tableAlias || 't'}.id, ${tableAlias || 't'}.order_id, ${tableAlias || 't'}.sku, ${tableAlias || 't'}.quantity, ${tableAlias || 't'}.unit_price`
-                                  : 'id, order_id, sku, quantity, unit_price'
-                              )
-                            }
-                            className="text-[10px] text-slate-400 hover:text-emerald-400 px-1.5 py-0.5 rounded bg-slate-800 cursor-pointer"
-                          >
-                            Line items
-                          </button>
-                          <button
-                            onClick={() => setCustomSelectClause('COUNT(*) AS total_count')}
-                            className="text-[10px] text-slate-400 hover:text-emerald-400 px-1.5 py-0.5 rounded bg-slate-800 cursor-pointer"
-                          >
-                            Count aggregation
-                          </button>
-                        </div>
-                      </div>
-                      <textarea
-                        value={customSelectClause}
-                        onChange={(e) => setCustomSelectClause(e.target.value)}
-                        placeholder={
-                          useTableAlias
-                            ? `e.g. ${tableAlias || 't'}.id, ${tableAlias || 't'}.name, ${tableAlias || 't'}.email, COALESCE(${tableAlias || 't'}.status, 'active') AS status`
-                            : "e.g. id, name, email, COALESCE(status, 'active') AS status"
-                        }
-                        rows={2}
-                        className="w-full bg-slate-950 border border-slate-750 rounded p-2 text-xs font-mono text-emerald-300 focus:outline-none focus:border-emerald-500"
-                      />
-                    </div>
-                  </div>
+                {/* Schema Columns Datalist for Auto-completion */}
+                {schemaColumns.length > 0 && (
+                  <datalist id="schema-columns-datalist">
+                    {schemaColumns.map((sc) => (
+                      <option key={sc.name} value={sc.name}>
+                        {sc.type} {sc.isPrimaryKey ? '(Primary Key)' : ''}
+                      </option>
+                    ))}
+                  </datalist>
                 )}
               </div>
+
+              {/* CARD 2: SELECT PROJECTION / COLUMNS AS PER SCHEMA FOR DIFFERENT USE CASES */}
+              <DbSelectSchemaColumnSelector
+                schemaColumns={schemaColumns}
+                selectColumns={selectColumns}
+                onChangeSelectColumns={setSelectColumns}
+                selectedUseCase={selectedUseCase}
+                onChangeSelectedUseCase={setSelectedUseCase}
+                customUseCases={customUseCases}
+                onSaveCustomUseCase={handleSaveCustomUseCase}
+                onDeleteCustomUseCase={handleDeleteCustomUseCase}
+                tableAlias={tableAlias}
+                useTableAlias={useTableAlias}
+                onAddMatchFilter={handleAddMatchFilterFromSchema}
+                selectAllColumns={selectAllColumns}
+                onToggleSelectAllColumns={setSelectAllColumns}
+                customSelectClause={customSelectClause}
+                onChangeCustomSelectClause={setCustomSelectClause}
+                projectionMode={projectionMode}
+                onChangeProjectionMode={setProjectionMode}
+                onOpenImportSchema={() => setIsSchemaImportModalOpen(true)}
+              />
 
               {/* CARD 3: QUERY STRATEGY & MODIFIERS */}
               <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-3 space-y-3">
@@ -1340,6 +1426,11 @@ export const DbSelectQueryGeneratorTool: React.FC<DbSelectQueryGeneratorToolProp
         initialTab={configModalTab}
         currentConfigData={{
           tableName,
+          schema: schemaName,
+          schemaColumns,
+          schemaDdl,
+          selectedUseCase,
+          customUseCases,
           useTableAlias,
           tableAlias,
           orderByMatchColumnId,
@@ -1359,6 +1450,15 @@ export const DbSelectQueryGeneratorTool: React.FC<DbSelectQueryGeneratorToolProp
           showNullForMissing,
         }}
         onApplyConfig={handleApplyConfig}
+      />
+
+      {/* Schema DDL Import Modal */}
+      <DbSelectSchemaImportModal
+        isOpen={isSchemaImportModalOpen}
+        onClose={() => setIsSchemaImportModalOpen(false)}
+        currentDdl={schemaDdl}
+        currentTableName={tableName}
+        onApplySchema={handleApplySchema}
       />
     </div>
   );

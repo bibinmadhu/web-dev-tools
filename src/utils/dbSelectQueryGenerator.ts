@@ -37,16 +37,43 @@ export interface MatchColumn {
   values: string[];      // list of values used when valueMode === 'list'
 }
 
+export interface TableColumn {
+  id: string;
+  name: string;
+  type: ColumnType;
+  isPrimaryKey?: boolean;
+  nullable?: boolean;
+  defaultValue?: string;
+  comment?: string;
+}
+
+export type ColumnAggregate =
+  | 'NONE'
+  | 'COUNT'
+  | 'SUM'
+  | 'AVG'
+  | 'MIN'
+  | 'MAX'
+  | 'DISTINCT'
+  | 'UPPER'
+  | 'LOWER'
+  | 'DATE';
+
 export interface SelectColumn {
   id: string;
   name: string;
   alias?: string;
   expression?: string;
+  type?: ColumnType;
+  isPrimaryKey?: boolean;
+  aggregate?: ColumnAggregate;
 }
 
 export interface SelectQueryOptions {
   tableName: string;
   schema?: string;
+  schemaColumns?: TableColumn[];
+  schemaDdl?: string;
   matchColumns: MatchColumn[];
   selectColumns: SelectColumn[];
   selectAllColumns?: boolean; // if true, generates SELECT *
@@ -54,6 +81,8 @@ export interface SelectQueryOptions {
   executionMode?: QueryExecutionMode; // 'batch' (single query) or 'individual' (separate statements)
   strategy: SelectStrategy;
   isDistinct?: boolean;
+  groupByColumns?: string[];
+  groupBy?: string;
   orderBy?: string;
   limit?: number | string;
   offset?: number | string;
@@ -497,6 +526,147 @@ export function prefixAliasToOrderBy(expr: string, alias: string): string {
 }
 
 /**
+ * Maps SQL data types to ColumnType
+ */
+export function mapSqlTypeToColumnType(typeStr: string): ColumnType {
+  const lower = typeStr.toLowerCase();
+  if (lower.includes('int8') || lower.includes('bigint') || lower.includes('bigserial')) return 'integer';
+  if (lower.includes('int') || lower.includes('serial')) return 'integer';
+  if (lower.includes('numeric') || lower.includes('decimal') || lower.includes('float') || lower.includes('double') || lower.includes('real')) return 'numeric';
+  if (lower.includes('bool')) return 'boolean';
+  if (lower.includes('timestamp') || lower.includes('timestamptz')) return 'timestamp';
+  if (lower.includes('date')) return 'date';
+  if (lower.includes('json')) return 'jsonb';
+  if (lower.includes('uuid')) return 'uuid';
+  return 'text';
+}
+
+/**
+ * Parses CREATE TABLE DDL into schema columns and table metadata
+ */
+export function parseCreateTableDdl(ddl: string): {
+  tableName: string;
+  schema: string;
+  schemaName: string;
+  columns: TableColumn[];
+  primaryKeys: string[];
+} {
+  const result = {
+    tableName: 'records',
+    schema: 'public',
+    schemaName: 'public',
+    columns: [] as TableColumn[],
+    primaryKeys: [] as string[],
+  };
+
+  if (!ddl || typeof ddl !== 'string') return result;
+
+  // 1. Extract table name: CREATE TABLE [IF NOT EXISTS] [schema.]table
+  const tableMatch = ddl.match(/CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+(?:([a-zA-Z0-9_"]+)\.)?([a-zA-Z0-9_"]+)/i);
+  if (tableMatch) {
+    if (tableMatch[1]) {
+      const cleanSchema = tableMatch[1].replace(/"/g, '');
+      result.schema = cleanSchema;
+      result.schemaName = cleanSchema;
+    }
+    result.tableName = tableMatch[2].replace(/"/g, '');
+  }
+
+  // 2. Extract column definitions inside the outer parentheses
+  const firstParen = ddl.indexOf('(');
+  const lastParen = ddl.lastIndexOf(')');
+  if (firstParen === -1 || lastParen === -1 || lastParen <= firstParen) {
+    return result;
+  }
+
+  const body = ddl.slice(firstParen + 1, lastParen);
+  
+  // Split columns by comma, respecting parentheses (e.g. numeric(10,2))
+  const rawParts: string[] = [];
+  let current = '';
+  let depth = 0;
+
+  for (let i = 0; i < body.length; i++) {
+    const char = body[i];
+    if (char === '(') depth++;
+    else if (char === ')') depth--;
+
+    if (char === ',' && depth === 0) {
+      if (current.trim()) rawParts.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  if (current.trim()) rawParts.push(current.trim());
+
+  // 3. Process each line
+  for (const part of rawParts) {
+    const cleanLine = part.replace(/\s+/g, ' ').trim();
+    if (!cleanLine) continue;
+
+    // Check for table-level PRIMARY KEY (col1, col2)
+    const pkMatch = cleanLine.match(/^(?:CONSTRAINT\s+\S+\s+)?PRIMARY\s+KEY\s*\(([^)]+)\)/i);
+    if (pkMatch) {
+      const pkCols = pkMatch[1].split(',').map((c) => c.trim().replace(/"/g, ''));
+      result.primaryKeys.push(...pkCols);
+      continue;
+    }
+
+    // Ignore other table constraints (FOREIGN KEY, CHECK, UNIQUE)
+    if (/^(?:CONSTRAINT\s+\S+\s+)?(?:FOREIGN\s+KEY|CHECK|UNIQUE)\s*\(/i.test(cleanLine)) {
+      continue;
+    }
+
+    // Parse column line: name type [constraints...]
+    const tokens = cleanLine.split(' ');
+    if (tokens.length < 2) continue;
+
+    const colName = tokens[0].replace(/"/g, '');
+    if (!colName || ['constraint', 'primary', 'foreign'].includes(colName.toLowerCase())) {
+      continue;
+    }
+
+    const typeStr = tokens[1].toLowerCase();
+    const inferredType = mapSqlTypeToColumnType(typeStr);
+
+    const isPk = /PRIMARY\s+KEY/i.test(cleanLine);
+    if (isPk) {
+      result.primaryKeys.push(colName);
+    }
+
+    const isNotNull = /NOT\s+NULL/i.test(cleanLine);
+
+    // Extract DEFAULT
+    let defaultValue: string | undefined = undefined;
+    const defaultMatch = cleanLine.match(/DEFAULT\s+([^,;]+?)(?:\s+(?:NOT\s+NULL|NULL|PRIMARY|CHECK|REFERENCES|$))/i);
+    if (defaultMatch) {
+      defaultValue = defaultMatch[1].trim();
+    }
+
+    result.columns.push({
+      id: `col-${colName.toLowerCase()}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      name: colName,
+      type: inferredType,
+      isPrimaryKey: isPk,
+      nullable: !isNotNull && !isPk,
+      defaultValue,
+    });
+  }
+
+  // Update primary key flag if found in table-level constraint
+  if (result.primaryKeys.length > 0) {
+    result.columns.forEach((c) => {
+      if (result.primaryKeys.includes(c.name)) {
+        c.isPrimaryKey = true;
+      }
+    });
+  }
+
+  return result;
+}
+
+/**
  * Formats select columns into a SQL projection clause
  */
 function buildSelectProjection(
@@ -581,6 +751,14 @@ function buildSelectProjection(
 
       if (!useTableAlias) {
         colExpr = stripAliasFromExpression(colExpr, tableAlias);
+      }
+
+      if (col.aggregate && col.aggregate !== 'NONE') {
+        if (col.aggregate === 'DISTINCT') {
+          colExpr = `DISTINCT ${colExpr}`;
+        } else {
+          colExpr = `${col.aggregate}(${colExpr})`;
+        }
       }
 
       if (col.alias && col.alias.trim()) {
@@ -671,10 +849,25 @@ export function generatePostgresSelectQuery(options: SelectQueryOptions): Select
   const listOrderDir: 'ASC' | 'DESC' = options.orderByMatchDirection === 'DESC' ? 'DESC' : 'ASC';
   const isListOrderActive = !!listOrderCol && totalRowCount > 0;
 
-  // Helper for modifiers (ORDER BY, LIMIT, OFFSET)
+  // Helper for modifiers (GROUP BY, ORDER BY, LIMIT, OFFSET)
   const buildModifiers = (listOrderClause?: string, indent = ''): string => {
     const parts: string[] = [];
     const orderItems: string[] = [];
+
+    // GROUP BY clause
+    if (options.groupByColumns && options.groupByColumns.length > 0) {
+      const groupCols = options.groupByColumns.map((c) => {
+        const id = sanitizeIdentifier(c);
+        return useTableAlias && tableAlias ? `${tableAlias}.${id}` : id;
+      });
+      parts.push(`${indent}GROUP BY ${groupCols.join(', ')}`);
+    } else if (options.groupBy && options.groupBy.trim()) {
+      let cleanGroupBy = options.groupBy.trim();
+      if (!useTableAlias) {
+        cleanGroupBy = stripAliasFromExpression(cleanGroupBy, tableAlias);
+      }
+      parts.push(`${indent}GROUP BY ${cleanGroupBy}`);
+    }
 
     // If order by match criteria list is selected, ONLY order by the match list!
     // As explicitly requested: "If Order by match critera list is selected remove order by as well."
@@ -901,7 +1094,8 @@ export function generatePostgresSelectQuery(options: SelectQueryOptions): Select
         const col = listMatchCols[0];
         const items = Array.from({ length: totalRowCount }).map((_, r) => {
           const val = getMatchColumnValue(col, r);
-          return formatPostgresValue(val, col.type, false);
+          const shouldCast = includeTypeCasts && (col.type === 'date' || col.type === 'timestamp' || col.type === 'uuid' || r === 0);
+          return formatPostgresValue(val, col.type, shouldCast);
         });
         const colRef = useTableAlias && tableAlias ? `${tableAlias}.${sanitizeIdentifier(col.name)}` : sanitizeIdentifier(col.name);
         whereConditions.push(`${colRef} IN (\n    ${items.join(',\n    ')}\n  )`);
@@ -909,7 +1103,10 @@ export function generatePostgresSelectQuery(options: SelectQueryOptions): Select
         // Multi-column tuple IN: (col1, col2) IN ((v1, v2), (v3, v4))
         const colTuple = `(${listMatchCols.map((c) => useTableAlias && tableAlias ? `${tableAlias}.${sanitizeIdentifier(c.name)}` : sanitizeIdentifier(c.name)).join(', ')})`;
         const tupleRows = Array.from({ length: totalRowCount }).map((_, r) => {
-          const rowVals = listMatchCols.map((c) => formatPostgresValue(getMatchColumnValue(c, r), c.type, false));
+          const rowVals = listMatchCols.map((c) => {
+            const shouldCast = includeTypeCasts && (c.type === 'date' || c.type === 'timestamp' || c.type === 'uuid');
+            return formatPostgresValue(getMatchColumnValue(c, r), c.type, shouldCast);
+          });
           return `    (${rowVals.join(', ')})`;
         });
         whereConditions.push(`${colTuple} IN (\n${tupleRows.join(',\n')}\n  )`);
@@ -1470,6 +1667,9 @@ export interface SelectPreset {
   name: string;
   description: string;
   tableName: string;
+  schema?: string;
+  schemaDdl?: string;
+  schemaColumns?: TableColumn[];
   useTableAlias?: boolean;
   tableAlias?: string;
   orderByMatchColumnId?: string;
@@ -1481,6 +1681,8 @@ export interface SelectPreset {
   executionMode?: QueryExecutionMode;
   strategy: SelectStrategy;
   isDistinct?: boolean;
+  groupByColumns?: string[];
+  groupBy?: string;
   orderBy?: string;
   limit?: number | string;
   offset?: number | string;
@@ -1494,6 +1696,25 @@ export const DB_SELECT_PRESETS: SelectPreset[] = [
     name: 'Users Lookup (Tenant ID + User IDs)',
     description: 'Bulk retrieve user records filtering by constant tenant and a list of user IDs',
     tableName: 'users',
+    schema: 'public',
+    schemaDdl: `CREATE TABLE public.users (
+  id SERIAL PRIMARY KEY,
+  tenant_id VARCHAR(64) NOT NULL,
+  username VARCHAR(64) NOT NULL UNIQUE,
+  email VARCHAR(255) NOT NULL,
+  role VARCHAR(32) NOT NULL DEFAULT 'member',
+  status VARCHAR(24) NOT NULL DEFAULT 'active',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);`,
+    schemaColumns: [
+      { id: 'sc-1', name: 'id', type: 'integer', isPrimaryKey: true, nullable: false },
+      { id: 'sc-2', name: 'tenant_id', type: 'text', nullable: false },
+      { id: 'sc-3', name: 'username', type: 'text', nullable: false },
+      { id: 'sc-4', name: 'email', type: 'text', nullable: false },
+      { id: 'sc-5', name: 'role', type: 'text', nullable: false, defaultValue: "'member'" },
+      { id: 'sc-6', name: 'status', type: 'text', nullable: false, defaultValue: "'active'" },
+      { id: 'sc-7', name: 'created_at', type: 'timestamp', nullable: true, defaultValue: 'NOW()' },
+    ],
     useTableAlias: true,
     tableAlias: 't',
     strategy: 'batch_values',
@@ -1777,6 +1998,274 @@ export const DB_SELECT_PRESETS: SelectPreset[] = [
 // ==========================================
 // CONFIGURATION EXPORT & IMPORT UTILITIES
 // ==========================================
+// SCHEMA USE CASES & TEMPLATES
+// ==========================================
+
+export interface SchemaUseCase {
+  id: string;
+  name: string;
+  description: string;
+  isCustom?: boolean;
+  columnNames?: string[];
+}
+
+export const BUILTIN_SCHEMA_USE_CASES: SchemaUseCase[] = [
+  {
+    id: 'all',
+    name: 'All Columns',
+    description: 'Retrieve full row records with all table columns projected',
+  },
+  {
+    id: 'keys',
+    name: 'Keys & Foreign Keys',
+    description: 'Primary key and foreign key reference columns (*_id, id)',
+  },
+  {
+    id: 'identity',
+    name: 'Lookup & Identity',
+    description: 'Core identifying fields (IDs, names, email, code, slug, title, sku)',
+  },
+  {
+    id: 'audit',
+    name: 'Audit & Tracking',
+    description: 'Lifecycle tracking (created_at, updated_at, status, version, tenant_id)',
+  },
+  {
+    id: 'metrics',
+    name: 'Metrics & Amounts',
+    description: 'Numeric quantities, amounts, totals, balances, rates, and prices',
+  },
+  {
+    id: 'safe_public',
+    name: 'Safe / Non-Sensitive',
+    description: 'Excludes credentials, password hashes, secrets, and auth tokens',
+  },
+  {
+    id: 'compact',
+    name: 'Compact Dropdown',
+    description: 'Lightweight key and display label projection for UI select menus',
+  },
+];
+
+export const SCHEMA_DDL_TEMPLATES: Array<{
+  id: string;
+  name: string;
+  description: string;
+  tableName: string;
+  ddl: string;
+}> = [
+  {
+    id: 'ecommerce_orders',
+    name: 'E-Commerce Orders',
+    description: 'Order fulfillment, customer references, amounts, and statuses',
+    tableName: 'customer_orders',
+    ddl: `CREATE TABLE public.customer_orders (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_number VARCHAR(64) NOT NULL UNIQUE,
+  customer_id VARCHAR(64) NOT NULL,
+  tenant_id VARCHAR(64) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'pending',
+  currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+  subtotal NUMERIC(12, 2) NOT NULL,
+  tax_amount NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  shipping_fee NUMERIC(12, 2) NOT NULL DEFAULT 0.00,
+  total_amount NUMERIC(12, 2) NOT NULL,
+  item_count INTEGER NOT NULL DEFAULT 1,
+  payment_method VARCHAR(32),
+  shipping_address_json JSONB,
+  tracking_number VARCHAR(128),
+  notes TEXT,
+  is_priority BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  delivered_at TIMESTAMPTZ
+);`,
+  },
+  {
+    id: 'users_auth',
+    name: 'Users & Authentication',
+    description: 'User accounts, profile metadata, roles, and security tokens',
+    tableName: 'users',
+    ddl: `CREATE TABLE public.users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  username VARCHAR(64) NOT NULL UNIQUE,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  full_name VARCHAR(128),
+  role VARCHAR(32) NOT NULL DEFAULT 'member',
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  tenant_id VARCHAR(64) NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  auth_token VARCHAR(255),
+  failed_login_attempts INT DEFAULT 0,
+  avatar_url TEXT,
+  phone_number VARCHAR(32),
+  is_verified BOOLEAN DEFAULT FALSE,
+  last_login_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);`,
+  },
+  {
+    id: 'saas_subscriptions',
+    name: 'SaaS Subscriptions',
+    description: 'Recurring billing tiers, quotas, seats, and renewal dates',
+    tableName: 'subscriptions',
+    ddl: `CREATE TABLE public.subscriptions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id VARCHAR(64) NOT NULL,
+  plan_code VARCHAR(64) NOT NULL,
+  tier VARCHAR(32) NOT NULL DEFAULT 'starter',
+  status VARCHAR(32) NOT NULL DEFAULT 'active',
+  billing_interval VARCHAR(16) NOT NULL DEFAULT 'monthly',
+  monthly_price NUMERIC(10, 2) NOT NULL,
+  seat_count INT NOT NULL DEFAULT 5,
+  storage_limit_gb INT NOT NULL DEFAULT 100,
+  trial_ends_at TIMESTAMPTZ,
+  current_period_start TIMESTAMPTZ NOT NULL,
+  current_period_end TIMESTAMPTZ NOT NULL,
+  cancel_at_period_end BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);`,
+  },
+  {
+    id: 'financial_ledger',
+    name: 'Financial Ledger',
+    description: 'Ledger entries, transaction types, debits, credits, and balances',
+    tableName: 'ledger_entries',
+    ddl: `CREATE TABLE public.ledger_entries (
+  entry_id BIGSERIAL PRIMARY KEY,
+  transaction_ref VARCHAR(64) NOT NULL,
+  account_id VARCHAR(64) NOT NULL,
+  entry_type VARCHAR(16) NOT NULL,
+  amount NUMERIC(14, 4) NOT NULL,
+  running_balance NUMERIC(14, 4) NOT NULL,
+  currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+  category VARCHAR(64) NOT NULL,
+  description TEXT,
+  cleared_status VARCHAR(16) DEFAULT 'posted',
+  posted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_by VARCHAR(64),
+  reconciliation_id VARCHAR(64)
+);`,
+  },
+  {
+    id: 'product_inventory',
+    name: 'Products & Inventory',
+    description: 'Catalog items, SKUs, inventory counts, pricing, and categories',
+    tableName: 'products',
+    ddl: `CREATE TABLE public.products (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  sku VARCHAR(64) NOT NULL UNIQUE,
+  title VARCHAR(255) NOT NULL,
+  description TEXT,
+  category VARCHAR(64) NOT NULL,
+  brand VARCHAR(64),
+  cost_price NUMERIC(10, 2) NOT NULL,
+  retail_price NUMERIC(10, 2) NOT NULL,
+  stock_quantity INT NOT NULL DEFAULT 0,
+  reorder_level INT NOT NULL DEFAULT 10,
+  is_discontinued BOOLEAN DEFAULT FALSE,
+  weight_kg NUMERIC(6, 2),
+  tags JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);`,
+  },
+];
+
+export function getColumnNamesForUseCase(
+  columns: TableColumn[],
+  useCaseId: string,
+  customUseCases?: SchemaUseCase[]
+): string[] {
+  if (!columns || columns.length === 0) return [];
+
+  // Check custom use case first
+  if (customUseCases && customUseCases.length > 0) {
+    const custom = customUseCases.find((c) => c.id === useCaseId);
+    if (custom && custom.columnNames && custom.columnNames.length > 0) {
+      return columns.filter((col) => custom.columnNames!.includes(col.name)).map((c) => c.name);
+    }
+  }
+
+  const allNames = columns.map((c) => c.name);
+
+  switch (useCaseId) {
+    case 'all':
+      return allNames;
+
+    case 'keys': {
+      const keys = columns
+        .filter((c) => c.isPrimaryKey || /(_id|_fk|^id)$/i.test(c.name))
+        .map((c) => c.name);
+      return keys.length > 0 ? keys : allNames;
+    }
+
+    case 'identity': {
+      const identities = columns
+        .filter(
+          (c) =>
+            c.isPrimaryKey ||
+            /(^id|_id$|name|username|email|slug|code|title|handle|sku|number)$/i.test(c.name)
+        )
+        .map((c) => c.name);
+      return identities.length > 0 ? identities : allNames;
+    }
+
+    case 'audit': {
+      const audit = columns
+        .filter((c) =>
+          /(created|updated|deleted|modified|_at|_date|status|state|version|active|tenant|author|by$)/i.test(
+            c.name
+          )
+        )
+        .map((c) => c.name);
+      return audit.length > 0 ? audit : allNames;
+    }
+
+    case 'metrics': {
+      const metrics = columns
+        .filter(
+          (c) =>
+            c.type === 'numeric' ||
+            c.type === 'integer' ||
+            /(amount|total|price|cost|balance|rate|qty|quantity|count|discount|tax|fee|score|subtotal)/i.test(
+              c.name
+            )
+        )
+        .map((c) => c.name);
+      return metrics.length > 0 ? metrics : allNames;
+    }
+
+    case 'safe_public': {
+      const safe = columns
+        .filter(
+          (c) =>
+            !/(password|secret|hash|token|salt|ssn|card|credit|cvv|pin|auth_key|private)/i.test(
+              c.name
+            )
+        )
+        .map((c) => c.name);
+      return safe.length > 0 ? safe : allNames;
+    }
+
+    case 'compact': {
+      const pk = columns.find((c) => c.isPrimaryKey) || columns[0];
+      const label =
+        columns.find(
+          (c) =>
+            c !== pk &&
+            /(name|title|username|code|slug|sku|order_number|title)/i.test(c.name)
+        ) || columns[1];
+      const result = [pk?.name, label?.name].filter(Boolean) as string[];
+      return result.length > 0 ? result : allNames.slice(0, 2);
+    }
+
+    default:
+      return allNames;
+  }
+}
 
 export interface DbSelectConfig {
   version: 1;
@@ -1796,12 +2285,18 @@ export interface DbSelectConfig {
   executionMode: QueryExecutionMode;
   strategy: SelectStrategy;
   isDistinct?: boolean;
+  groupByColumns?: string[];
+  groupBy?: string;
   orderBy?: string;
   limit?: number | string;
   offset?: number | string;
   includeTypeCasts: boolean;
   includeRowComments: boolean;
   showNullForMissing?: boolean;
+  schemaColumns?: TableColumn[];
+  schemaDdl?: string;
+  selectedUseCase?: string;
+  customUseCases?: SchemaUseCase[];
 }
 
 export function createDbSelectConfigExport(data: {
@@ -1817,6 +2312,8 @@ export function createDbSelectConfigExport(data: {
   executionMode?: QueryExecutionMode;
   strategy?: SelectStrategy;
   isDistinct?: boolean;
+  groupByColumns?: string[];
+  groupBy?: string;
   orderBy?: string;
   limit?: number | string;
   offset?: number | string;
@@ -1825,6 +2322,10 @@ export function createDbSelectConfigExport(data: {
   showNullForMissing?: boolean;
   name?: string;
   description?: string;
+  schemaColumns?: TableColumn[];
+  schemaDdl?: string;
+  selectedUseCase?: string;
+  customUseCases?: SchemaUseCase[];
 }): DbSelectConfig {
   return {
     version: 1,
@@ -1851,18 +2352,27 @@ export function createDbSelectConfigExport(data: {
       name: col.name ? col.name.trim() : `col_${idx + 1}`,
       alias: col.alias || '',
       expression: col.expression || '',
+      type: col.type,
+      isPrimaryKey: col.isPrimaryKey,
+      aggregate: col.aggregate,
     })),
     selectAllColumns: !!data.selectAllColumns,
     customSelectClause: data.customSelectClause || '',
     executionMode: data.executionMode === 'individual' ? 'individual' : 'batch',
     strategy: data.strategy || 'batch_values',
     isDistinct: !!data.isDistinct,
+    groupByColumns: Array.isArray(data.groupByColumns) ? data.groupByColumns.map(String) : undefined,
+    groupBy: data.groupBy || '',
     orderBy: data.orderBy || '',
     limit: data.limit !== undefined ? data.limit : '',
     offset: data.offset !== undefined ? data.offset : '',
     includeTypeCasts: data.includeTypeCasts !== false,
     includeRowComments: data.includeRowComments !== false,
     showNullForMissing: !!data.showNullForMissing,
+    schemaColumns: Array.isArray(data.schemaColumns) ? data.schemaColumns : undefined,
+    schemaDdl: data.schemaDdl || undefined,
+    selectedUseCase: data.selectedUseCase || undefined,
+    customUseCases: Array.isArray(data.customUseCases) ? data.customUseCases : undefined,
   };
 }
 
@@ -1916,10 +2426,26 @@ export function validateAndParseDbSelectConfig(input: string | unknown): {
         const name = typeof sc.name === 'string' && sc.name.trim() ? sc.name.trim() : `col_${idx + 1}`;
         const alias = typeof sc.alias === 'string' ? sc.alias : '';
         const expression = typeof sc.expression === 'string' ? sc.expression : '';
-        return { id, name, alias, expression };
+        const type = sc.type;
+        const isPrimaryKey = Boolean(sc.isPrimaryKey);
+        const aggregate = sc.aggregate;
+        return { id, name, alias, expression, type, isPrimaryKey, aggregate };
       });
     } else {
       selectCols = [{ id: 'sel-1', name: '*' }];
+    }
+
+    let schemaColumns: TableColumn[] | undefined = undefined;
+    if (Array.isArray(raw.schemaColumns) && raw.schemaColumns.length > 0) {
+      schemaColumns = raw.schemaColumns.map((col: any, idx: number) => ({
+        id: col.id || `col-${col.name || idx}-${Date.now()}`,
+        name: typeof col.name === 'string' ? col.name.trim() : `col_${idx + 1}`,
+        type: validTypes.includes(col.type) ? col.type : 'text',
+        isPrimaryKey: Boolean(col.isPrimaryKey),
+        nullable: col.nullable !== false,
+        defaultValue: col.defaultValue ? String(col.defaultValue) : undefined,
+        comment: col.comment ? String(col.comment) : undefined,
+      }));
     }
 
     const executionMode: QueryExecutionMode = raw.executionMode === 'individual' ? 'individual' : 'batch';
@@ -1953,12 +2479,18 @@ export function validateAndParseDbSelectConfig(input: string | unknown): {
       executionMode,
       strategy,
       isDistinct: !!raw.isDistinct,
+      groupByColumns: Array.isArray(raw.groupByColumns) ? raw.groupByColumns.map(String) : undefined,
+      groupBy: typeof raw.groupBy === 'string' ? raw.groupBy : '',
       orderBy: typeof raw.orderBy === 'string' ? raw.orderBy : '',
       limit: raw.limit !== undefined ? raw.limit : '',
       offset: raw.offset !== undefined ? raw.offset : '',
       includeTypeCasts: raw.includeTypeCasts !== false,
       includeRowComments: raw.includeRowComments !== false,
       showNullForMissing: !!raw.showNullForMissing,
+      schemaColumns,
+      schemaDdl: typeof raw.schemaDdl === 'string' ? raw.schemaDdl : undefined,
+      selectedUseCase: typeof raw.selectedUseCase === 'string' ? raw.selectedUseCase : undefined,
+      customUseCases: Array.isArray(raw.customUseCases) ? raw.customUseCases : undefined,
     };
 
     return { success: true, config };

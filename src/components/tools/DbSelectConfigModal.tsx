@@ -21,9 +21,11 @@ import {
 import {
   MatchColumn,
   SelectColumn,
+  TableColumn,
   QueryExecutionMode,
   SelectStrategy,
   DbSelectConfig,
+  SchemaUseCase,
   createDbSelectConfigExport,
   validateAndParseDbSelectConfig,
 } from '../../utils/dbSelectQueryGenerator';
@@ -33,6 +35,11 @@ export interface DbSelectConfigModalProps {
   onClose: () => void;
   currentConfigData: {
     tableName: string;
+    schema?: string;
+    schemaColumns?: TableColumn[];
+    schemaDdl?: string;
+    selectedUseCase?: string;
+    customUseCases?: SchemaUseCase[];
     useTableAlias?: boolean;
     tableAlias?: string;
     orderByMatchColumnId?: string;
@@ -44,6 +51,8 @@ export interface DbSelectConfigModalProps {
     executionMode: QueryExecutionMode;
     strategy: SelectStrategy;
     isDistinct?: boolean;
+    groupByColumns?: string[];
+    groupBy?: string;
     orderBy?: string;
     limit?: number | string;
     offset?: number | string;
@@ -367,6 +376,9 @@ export const DbSelectConfigModal: React.FC<DbSelectConfigModalProps> = ({
                         <div>
                           <span className="text-slate-400 block">Target Table:</span>
                           <strong className="text-white">{parseResult.config.tableName}</strong>
+                          {parseResult.config.schema && (
+                            <span className="text-[10px] text-slate-400 block">({parseResult.config.schema})</span>
+                          )}
                         </div>
                         <div>
                           <span className="text-slate-400 block">Match Keys:</span>
@@ -381,6 +393,11 @@ export const DbSelectConfigModal: React.FC<DbSelectConfigModalProps> = ({
                           <strong className="text-white">
                             {parseResult.config.selectAllColumns ? 'All (*)' : `${parseResult.config.selectColumns.length} columns`}
                           </strong>
+                          {parseResult.config.schemaColumns && parseResult.config.schemaColumns.length > 0 && (
+                            <span className="text-[10px] text-indigo-300 block font-mono">
+                              +{parseResult.config.schemaColumns.length} schema cols
+                            </span>
+                          )}
                         </div>
                         <div>
                           <span className="text-slate-400 block">Strategy / Mode:</span>

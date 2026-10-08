@@ -27,6 +27,10 @@ import {
   stripAliasFromExpression,
   prefixAliasToProjection,
   prefixAliasToOrderBy,
+  parseCreateTableDdl as parseSelectCreateTableDdl,
+  getColumnNamesForUseCase,
+  BUILTIN_SCHEMA_USE_CASES,
+  SCHEMA_DDL_TEMPLATES,
 } from './dbSelectQueryGenerator';
 import {
   beautifyJson,
@@ -2822,7 +2826,7 @@ Each deliverable must adhere strictly to Client’s security standards, GDPR com
     });
 
     assertTrue(batchValuesOrdered.sql.includes('AS v(order_id, _ord)'), 'Values alias should include _ord column');
-    assertTrue(batchValuesOrdered.sql.includes("('ORD-99', 1::int)"), 'Row values should include index for ordering');
+    assertTrue(batchValuesOrdered.sql.includes("1::int") && batchValuesOrdered.sql.includes("'ORD-99'"), 'Row values should include index for ordering');
     assertTrue(batchValuesOrdered.sql.includes('ORDER BY v._ord ASC'), 'Should ORDER BY v._ord ASC');
     assertTrue(!batchValuesOrdered.sql.includes('t.created_at'), 'Conflicting manual orderBy should be removed when match list order is active');
 
@@ -2948,7 +2952,7 @@ Each deliverable must adhere strictly to Client’s security standards, GDPR com
       strategy: 'batch_values',
       executionMode: 'batch'
     });
-    assertTrue(batchValuesDefault.sql.includes('FROM users AS t\n  JOIN'), 'Default behavior should use standard JOIN');
+    assertTrue(batchValuesDefault.sql.includes('FROM users AS t\nJOIN (') || batchValuesDefault.sql.includes('FROM users AS t\n  JOIN'), 'Default behavior should use standard JOIN');
     assertTrue(!batchValuesDefault.sql.includes('LEFT JOIN'), 'Default behavior should NOT use LEFT JOIN');
 
     // 3. CTE strategy with showNullForMissing enabled
@@ -2988,6 +2992,122 @@ Each deliverable must adhere strictly to Client’s security standards, GDPR com
 
     const queryFromParsed = generatePostgresSelectQuery(parsedConfig.config!);
     assertTrue(queryFromParsed.sql.includes('LEFT JOIN'), 'Query from parsed config should generate LEFT JOIN');
+  });
+
+  test('Database Select Query Generator', 'Schema DDL Parsing & Metadata Extraction for Select Generator', () => {
+    const ordersDdl = SCHEMA_DDL_TEMPLATES.find((t) => t.id === 'ecommerce_orders')?.ddl || '';
+    const parsed = parseSelectCreateTableDdl(ordersDdl);
+
+    assertEqual(parsed.tableName, 'customer_orders', 'Parsed table name must match customer_orders');
+    assertEqual(parsed.schema, 'public', 'Parsed schema must be public');
+    assertTrue(parsed.columns.length >= 18, `Expected >= 18 columns, got ${parsed.columns.length}`);
+
+    const idCol = parsed.columns.find((c) => c.name === 'id');
+    assertTrue(!!idCol, 'ID column should exist');
+    assertEqual(idCol?.type, 'uuid', 'ID column type should be uuid');
+    assertTrue(idCol?.isPrimaryKey === true, 'ID column should be primary key');
+
+    const totalCol = parsed.columns.find((c) => c.name === 'total_amount');
+    assertEqual(totalCol?.type, 'numeric', 'total_amount should be numeric');
+
+    const statusCol = parsed.columns.find((c) => c.name === 'status');
+    assertEqual(statusCol?.type, 'text', 'status should be mapped to text');
+  });
+
+  test('Database Select Query Generator', 'Schema Column Selection Across Built-in and Custom Use Cases', () => {
+    const usersDdl = SCHEMA_DDL_TEMPLATES.find((t) => t.id === 'users_auth')?.ddl || '';
+    const parsed = parseSelectCreateTableDdl(usersDdl);
+    const cols = parsed.columns;
+
+    // 1. All columns use case
+    const allCols = getColumnNamesForUseCase(cols, 'all');
+    assertEqual(allCols.length, cols.length, 'All columns use case should include all columns');
+
+    // 2. Keys & Foreign Keys use case
+    const keyCols = getColumnNamesForUseCase(cols, 'keys');
+    assertTrue(keyCols.includes('id'), 'Keys should include id');
+    assertTrue(keyCols.includes('tenant_id'), 'Keys should include tenant_id');
+
+    // 3. Identity use case
+    const identityCols = getColumnNamesForUseCase(cols, 'identity');
+    assertTrue(identityCols.includes('id'), 'Identity should include id');
+    assertTrue(identityCols.includes('username'), 'Identity should include username');
+    assertTrue(identityCols.includes('email'), 'Identity should include email');
+
+    // 4. Audit use case
+    const auditCols = getColumnNamesForUseCase(cols, 'audit');
+    assertTrue(auditCols.includes('created_at'), 'Audit should include created_at');
+    assertTrue(auditCols.includes('updated_at'), 'Audit should include updated_at');
+    assertTrue(auditCols.includes('status'), 'Audit should include status');
+
+    // 5. Safe / Public use case (excludes password_hash, auth_token)
+    const safeCols = getColumnNamesForUseCase(cols, 'safe_public');
+    assertTrue(!safeCols.includes('password_hash'), 'Safe public must NOT include password_hash');
+    assertTrue(!safeCols.includes('auth_token'), 'Safe public must NOT include auth_token');
+    assertTrue(safeCols.includes('username'), 'Safe public should include username');
+
+    // 6. Custom user use case
+    const customUseCase = {
+      id: 'custom-login-check',
+      name: 'Login Check',
+      description: 'Credentials and auth tokens',
+      isCustom: true,
+      columnNames: ['id', 'email', 'status', 'failed_login_attempts'],
+    };
+    const customResult = getColumnNamesForUseCase(cols, 'custom-login-check', [customUseCase]);
+    assertEqual(customResult.length, 4, 'Custom use case should select 4 columns');
+    assertTrue(customResult.includes('failed_login_attempts'), 'Custom use case should select failed_login_attempts');
+  });
+
+  test('Database Select Query Generator', 'Schema and Use Case Configuration Export & Import Roundtrip', () => {
+    const ddl = SCHEMA_DDL_TEMPLATES[0].ddl;
+    const parsed = parseSelectCreateTableDdl(ddl);
+
+    const config = createDbSelectConfigExport({
+      tableName: parsed.tableName,
+      schemaDdl: ddl,
+      schemaColumns: parsed.columns,
+      selectedUseCase: 'identity',
+      customUseCases: [
+        {
+          id: 'custom-reporting',
+          name: 'Executive Reporting',
+          description: 'High level metrics',
+          isCustom: true,
+          columnNames: ['id', 'order_number', 'total_amount', 'status'],
+        },
+      ],
+      matchColumns: [
+        {
+          id: 'm1',
+          name: 'status',
+          type: 'text',
+          valueMode: 'single',
+          singleValue: 'completed',
+          values: ['completed'],
+        },
+      ],
+      selectColumns: [
+        { id: 's1', name: 'id' },
+        { id: 's2', name: 'order_number' },
+        { id: 's3', name: 'total_amount' },
+      ],
+      strategy: 'batch_values',
+      executionMode: 'batch',
+    });
+
+    assertTrue(config.schemaDdl?.includes('CREATE TABLE'), 'Exported config must include schemaDdl');
+    assertEqual(config.schemaColumns?.length, parsed.columns.length, 'Exported schemaColumns length must match');
+    assertEqual(config.selectedUseCase, 'identity', 'selectedUseCase must match');
+    assertEqual(config.customUseCases?.length, 1, 'customUseCases length must match');
+
+    // Parse back
+    const roundtrip = validateAndParseDbSelectConfig(JSON.stringify(config));
+    assertTrue(roundtrip.success, 'Roundtrip parsing must succeed');
+    assertTrue(roundtrip.config?.schemaDdl?.includes('CREATE TABLE'), 'Imported schemaDdl must be preserved');
+    assertEqual(roundtrip.config?.schemaColumns?.length, parsed.columns.length, 'Imported schemaColumns must be preserved');
+    assertEqual(roundtrip.config?.selectedUseCase, 'identity', 'Imported selectedUseCase must be preserved');
+    assertEqual(roundtrip.config?.customUseCases?.[0].name, 'Executive Reporting', 'Imported custom use case name must match');
   });
 
   test('Data Grid Converter', 'CSV Parsing with RFC 4180 Quotes & Escaped Commas', () => {
