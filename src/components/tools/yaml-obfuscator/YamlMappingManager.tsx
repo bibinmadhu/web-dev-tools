@@ -13,6 +13,7 @@ import {
   ArrowRight,
   Shield,
   Layers,
+  EyeOff,
 } from 'lucide-react';
 import {
   YamlObfuscatorMapping,
@@ -23,12 +24,16 @@ export interface YamlMappingManagerProps {
   mapping: YamlObfuscatorMapping | null;
   onUpdateMapping: (updated: YamlObfuscatorMapping) => void;
   onOpenConfigModal: (tab: 'export' | 'import') => void;
+  excludedValues?: string[];
+  onToggleExcludeValue?: (value: string) => void;
 }
 
 export const YamlMappingManager: React.FC<YamlMappingManagerProps> = ({
   mapping,
   onUpdateMapping,
   onOpenConfigModal,
+  excludedValues = [],
+  onToggleExcludeValue,
 }) => {
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [filterCategory, setFilterCategory] = useState<'all' | 'keys' | 'values' | 'anchors'>('all');
@@ -361,7 +366,12 @@ export const YamlMappingManager: React.FC<YamlMappingManagerProps> = ({
                   </td>
 
                   <td className="py-2 px-3 text-slate-900 dark:text-slate-200 break-all">
-                    {item.original}
+                    <span>{item.original}</span>
+                    {item.category === 'values' && excludedValues.some((ev) => ev.toLowerCase() === item.original.toLowerCase()) && (
+                      <span className="ml-2 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-100 dark:bg-amber-950/80 text-amber-700 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                        Excluded
+                      </span>
+                    )}
                   </td>
 
                   <td className="py-2 px-3 text-center text-slate-400 font-sans">→</td>
@@ -372,6 +382,23 @@ export const YamlMappingManager: React.FC<YamlMappingManagerProps> = ({
 
                   <td className="py-2 px-3 text-right">
                     <div className="flex items-center justify-end gap-1">
+                      {item.category === 'values' && onToggleExcludeValue && (
+                        <button
+                          onClick={() => onToggleExcludeValue(item.original)}
+                          className={`p-1 rounded transition-colors ${
+                            excludedValues.some((ev) => ev.toLowerCase() === item.original.toLowerCase())
+                              ? 'text-amber-500 hover:text-amber-600 bg-amber-50 dark:bg-amber-950/50'
+                              : 'text-slate-400 hover:text-amber-500'
+                          }`}
+                          title={
+                            excludedValues.some((ev) => ev.toLowerCase() === item.original.toLowerCase())
+                              ? 'Re-enable obfuscation for this value'
+                              : 'Disable obfuscation for this value (add to excluded list)'
+                          }
+                        >
+                          <EyeOff className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                       <button
                         onClick={() => handleCopy(item.obfuscated)}
                         className="p-1 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 rounded transition-colors"

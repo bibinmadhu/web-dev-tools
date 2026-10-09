@@ -5999,17 +5999,62 @@ CREATE TABLE "size_test" (
 
   test('YAML Obfuscator & De-obfuscator', 'Lossless Bi-directional Obfuscation and De-obfuscation', () => {
     const yaml = 'db_config:\n  host: prod.internal.net\n  user: admin\n  password: SecretPassword999\n';
+    
+    // Default: Obfuscate Values ONLY (client sensitive data masked, structural keys preserved)
     const result = obfuscateYaml(yaml);
-
     assertTrue(result.obfuscatedYaml.length > 0, 'Generates obfuscated YAML output');
     assertTrue(!result.obfuscatedYaml.includes('SecretPassword999'), 'Sensitive password value is masked');
     assertTrue(!result.obfuscatedYaml.includes('prod.internal.net'), 'Sensitive host value is masked');
-    assertTrue(Boolean(result.mapping.keys['password']), 'Password key is mapped');
+    assertTrue(result.obfuscatedYaml.includes('password:'), 'Password property key is preserved by default');
     assertTrue(Boolean(result.mapping.values['SecretPassword999']), 'Password value is mapped');
 
     const deob = deobfuscateYaml(result.obfuscatedYaml, result.mapping);
     assertEqual(deob.deobfuscatedYaml.trim(), yaml.trim(), 'De-obfuscated YAML exactly matches original');
     assertTrue(deob.restoredCount > 0, 'Restored tokens count is greater than zero');
+
+    // Both Keys and Values when obfuscateKeys is enabled
+    const resultBoth = obfuscateYaml(yaml, { obfuscateKeys: true, obfuscateValues: true });
+    assertTrue(!resultBoth.obfuscatedYaml.includes('password:'), 'Password key is masked when obfuscateKeys is true');
+    assertTrue(Boolean(resultBoth.mapping.keys['password']), 'Password key is mapped');
+    const deobBoth = deobfuscateYaml(resultBoth.obfuscatedYaml, resultBoth.mapping);
+    assertEqual(deobBoth.deobfuscatedYaml.trim(), yaml.trim(), 'De-obfuscates both keys and values perfectly');
+  });
+
+  test('YAML Obfuscator & De-obfuscator', 'User Option to Select Keys or Values and Disable Specific Values', () => {
+    const yaml = `server:
+  host: staging-db.internal.net
+  api_key: sk_live_secret_token_12345
+  database: clients_records
+`;
+    // 1. Exclude specific value from obfuscation
+    const resWithExcluded = obfuscateYaml(yaml, {
+      excludedValues: ['staging-db.internal.net'],
+    });
+
+    // staging-db.internal.net is disabled/excluded, so it remains plaintext!
+    assertTrue(
+      resWithExcluded.obfuscatedYaml.includes('staging-db.internal.net'),
+      'Excluded value staging-db.internal.net is preserved in plaintext'
+    );
+    // sk_live_secret_token_12345 is NOT excluded, so it is masked!
+    assertTrue(
+      !resWithExcluded.obfuscatedYaml.includes('sk_live_secret_token_12345'),
+      'Non-excluded API key is safely obfuscated'
+    );
+    assertEqual(resWithExcluded.mapping.values['staging-db.internal.net'], undefined, 'Excluded value is not in mapping dictionary');
+    assertTrue(Boolean(resWithExcluded.mapping.values['sk_live_secret_token_12345']), 'Non-excluded value is in mapping');
+
+    // De-obfuscation still works losslessly
+    const deob = deobfuscateYaml(resWithExcluded.obfuscatedYaml, resWithExcluded.mapping);
+    assertEqual(deob.deobfuscatedYaml.trim(), yaml.trim(), 'Lossless restoration with excluded values');
+
+    // 2. Select Keys only (Values obfuscation disabled)
+    const resKeysOnly = obfuscateYaml(yaml, {
+      obfuscateKeys: true,
+      obfuscateValues: false,
+    });
+    assertTrue(resKeysOnly.obfuscatedYaml.includes('sk_live_secret_token_12345'), 'Values preserved when obfuscateValues is false');
+    assertTrue(!resKeysOnly.obfuscatedYaml.includes('api_key:'), 'Keys masked when obfuscateKeys is true');
   });
 
   test('YAML Obfuscator & De-obfuscator', 'Sensitive Value Masking vs Excluded Structural Keys', () => {

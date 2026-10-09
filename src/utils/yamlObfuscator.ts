@@ -38,6 +38,7 @@ export interface YamlObfuscatorOptions {
   maskNumbers: boolean;
   maskBooleans: boolean;
   excludedKeys: string[];
+  excludedValues: string[];
   preserveQuotes: boolean;
   customOverrides?: Record<string, string>;
 }
@@ -127,8 +128,8 @@ export const DEFAULT_YAML_OBFUSCATOR_OPTIONS: YamlObfuscatorOptions = {
   keyPrefix: 'k_',
   valuePrefix: 'val_',
   anchorPrefix: 'anc_',
-  obfuscateKeys: true,
-  obfuscateValues: true,
+  obfuscateKeys: false, // Default: values only (keys preserved to retain YAML structure)
+  obfuscateValues: true, // Default: enabled
   valueMode: 'sensitive_only',
   sensitiveKeyPatterns: [...DEFAULT_SENSITIVE_KEY_PATTERNS],
   obfuscateAnchors: true,
@@ -136,6 +137,7 @@ export const DEFAULT_YAML_OBFUSCATOR_OPTIONS: YamlObfuscatorOptions = {
   maskNumbers: false,
   maskBooleans: false,
   excludedKeys: [...DEFAULT_EXCLUDED_YAML_KEYS],
+  excludedValues: [],
   preserveQuotes: true,
   customOverrides: {},
 };
@@ -324,7 +326,8 @@ export function obfuscateYaml(
   let replacementsCount = 0;
   let commentsCount = 0;
 
-  const excludedSet = new Set(options.excludedKeys.map((k) => k.toLowerCase()));
+  const excludedSet = new Set((options.excludedKeys || []).map((k) => k.toLowerCase()));
+  const excludedValuesSet = new Set((options.excludedValues || []).map((v) => v.trim().toLowerCase()));
 
   // Helper to get or create key mapping
   function getOrAssignKey(origKey: string): string {
@@ -463,27 +466,35 @@ export function obfuscateYaml(
         if (pair.value && isScalar(pair.value)) {
           const val = pair.value.value;
 
-          // String Value Obfuscation
-          if (typeof val === 'string' && options.obfuscateValues) {
-            let shouldObfuscate = false;
+          // Candidate tracking and string value obfuscation
+          if (typeof val === 'string') {
+            const keyIsSensitive = Boolean(parentKeyName && isSensitiveKey(parentKeyName, options.sensitiveKeyPatterns));
+            const valIsSensitive = isSensitiveValuePattern(val);
+            const isCandidate = options.valueMode === 'all_strings' || keyIsSensitive || valIsSensitive;
 
-            if (options.valueMode === 'all_strings') {
-              shouldObfuscate = true;
-            } else if (options.valueMode === 'sensitive_only') {
-              const keyIsSensitive = parentKeyName && isSensitiveKey(parentKeyName, options.sensitiveKeyPatterns);
-              const valIsSensitive = isSensitiveValuePattern(val);
-              shouldObfuscate = keyIsSensitive || valIsSensitive;
-            } else if (options.valueMode === 'custom_keys_only') {
-              shouldObfuscate = parentKeyName && isSensitiveKey(parentKeyName, options.sensitiveKeyPatterns);
+            if (isCandidate && val.trim() !== '' && !detectedValues.includes(val)) {
+              detectedValues.push(val);
             }
 
-            if (shouldObfuscate && val.trim() !== '') {
-              if (!detectedValues.includes(val)) {
-                detectedValues.push(val);
+            if (options.obfuscateValues) {
+              const isExcludedVal = excludedValuesSet.has(val.trim().toLowerCase());
+              let shouldObfuscate = false;
+
+              if (!isExcludedVal) {
+                if (options.valueMode === 'all_strings') {
+                  shouldObfuscate = true;
+                } else if (options.valueMode === 'sensitive_only') {
+                  shouldObfuscate = keyIsSensitive || valIsSensitive;
+                } else if (options.valueMode === 'custom_keys_only') {
+                  shouldObfuscate = keyIsSensitive;
+                }
               }
-              const obfVal = getOrAssignValue(val);
-              pair.value.value = obfVal;
-              replacementsCount++;
+
+              if (shouldObfuscate && val.trim() !== '') {
+                const obfVal = getOrAssignValue(val);
+                pair.value.value = obfVal;
+                replacementsCount++;
+              }
             }
           }
 
@@ -503,24 +514,32 @@ export function obfuscateYaml(
 
       // Process sequence items (scalars in arrays)
       Seq(_, seq) {
-        if (!options.obfuscateValues) return;
         seq.items.forEach((item) => {
           if (isScalar(item) && typeof item.value === 'string') {
             const val = item.value;
-            let shouldObf = false;
-            if (options.valueMode === 'all_strings') {
-              shouldObf = true;
-            } else if (options.valueMode === 'sensitive_only') {
-              shouldObf = isSensitiveValuePattern(val);
+            const valIsSensitive = isSensitiveValuePattern(val);
+            const isCandidate = options.valueMode === 'all_strings' || valIsSensitive;
+
+            if (isCandidate && val.trim() !== '' && !detectedValues.includes(val)) {
+              detectedValues.push(val);
             }
 
-            if (shouldObf && val.trim() !== '') {
-              if (!detectedValues.includes(val)) {
-                detectedValues.push(val);
+            if (options.obfuscateValues) {
+              const isExcludedVal = excludedValuesSet.has(val.trim().toLowerCase());
+              let shouldObf = false;
+              if (!isExcludedVal) {
+                if (options.valueMode === 'all_strings') {
+                  shouldObf = true;
+                } else if (options.valueMode === 'sensitive_only') {
+                  shouldObf = valIsSensitive;
+                }
               }
-              const obfVal = getOrAssignValue(val);
-              item.value = obfVal;
-              replacementsCount++;
+
+              if (shouldObf && val.trim() !== '') {
+                const obfVal = getOrAssignValue(val);
+                item.value = obfVal;
+                replacementsCount++;
+              }
             }
           }
         });
@@ -669,16 +688,21 @@ function fallbackRegexObfuscate(
 
     if (options.obfuscateValues && val.trim()) {
       const cleanVal = val.trim().replace(/^['"]|['"]$/g, '');
-      const isSens = isSensitiveKey(key, options.sensitiveKeyPatterns) || isSensitiveValuePattern(cleanVal);
-      if (isSens) {
-        if (!valuesMap[cleanVal]) {
-          valCounter++;
-          const obfVal = generateObfuscatedIdentifier('value', valCounter, cleanVal, options);
-          valuesMap[cleanVal] = obfVal;
-          reverseValuesMap[obfVal] = cleanVal;
+      const isExcludedVal = (options.excludedValues || []).some(
+        (ev) => ev.trim().toLowerCase() === cleanVal.toLowerCase()
+      );
+      if (!isExcludedVal) {
+        const isSens = isSensitiveKey(key, options.sensitiveKeyPatterns) || isSensitiveValuePattern(cleanVal);
+        if (isSens) {
+          if (!valuesMap[cleanVal]) {
+            valCounter++;
+            const obfVal = generateObfuscatedIdentifier('value', valCounter, cleanVal, options);
+            valuesMap[cleanVal] = obfVal;
+            reverseValuesMap[obfVal] = cleanVal;
+          }
+          val = `"${valuesMap[cleanVal]}"`;
+          replacementsCount++;
         }
-        val = `"${valuesMap[cleanVal]}"`;
-        replacementsCount++;
       }
     }
 
@@ -925,6 +949,12 @@ export function validateAndParseYamlConfig(input: string | unknown): {
     const options: YamlObfuscatorOptions = {
       ...DEFAULT_YAML_OBFUSCATOR_OPTIONS,
       ...(raw.options || {}),
+      excludedKeys: Array.isArray(raw.options?.excludedKeys)
+        ? raw.options.excludedKeys
+        : DEFAULT_YAML_OBFUSCATOR_OPTIONS.excludedKeys,
+      excludedValues: Array.isArray(raw.options?.excludedValues)
+        ? raw.options.excludedValues
+        : [],
     };
 
     // Extract mappings

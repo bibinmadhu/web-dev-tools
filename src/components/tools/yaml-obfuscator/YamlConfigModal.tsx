@@ -261,11 +261,11 @@ export const YamlConfigModal: React.FC<YamlConfigModalProps> = ({
           {/* TAB 1: EXPORT */}
           {activeTab === 'export' && (
             <div className="space-y-4">
-              {!currentMapping || Object.keys(currentMapping.keys).length === 0 ? (
+              {!currentMapping || (Object.keys(currentMapping.keys).length === 0 && Object.keys(currentMapping.values).length === 0 && Object.keys(currentMapping.anchors).length === 0) ? (
                 <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-500/30 rounded-lg p-3.5 text-amber-800 dark:text-amber-300 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 shrink-0" />
                   <span>
-                    No active obfuscation mapping found yet. Run an obfuscation in the main editor to populate keys and values.
+                    No active obfuscation mapping found yet. Run an obfuscation in the main editor to populate keys or values.
                   </span>
                 </div>
               ) : (
