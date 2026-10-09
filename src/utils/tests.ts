@@ -80,6 +80,18 @@ import {
   obfuscatePythonCode,
   deobfuscatePythonCode,
 } from './pythonObfuscator';
+import {
+  obfuscateYaml,
+  deobfuscateYaml,
+  createYamlConfigExport,
+  validateAndParseYamlConfig,
+  generateObfuscatedIdentifier,
+  isSensitiveKey,
+  isSensitiveValuePattern,
+  DEFAULT_YAML_OBFUSCATOR_OPTIONS,
+  DEFAULT_EXCLUDED_YAML_KEYS,
+  YAML_PRESETS,
+} from './yamlObfuscator';
 import { PYTHON_PRESETS } from './pythonPresets';
 import {
   convertChessGame,
@@ -5979,6 +5991,113 @@ CREATE TABLE "size_test" (
     assertEqual(parsed.config?.tableName, preset.options.tableName, 'Table name preserved');
     assertEqual(parsed.config?.strategy, preset.options.strategy, 'Strategy preserved');
     assertEqual(parsed.config?.conditions.length, preset.options.conditions.length, 'Conditions count preserved');
+  });
+
+  // ==========================================
+  // YAML Obfuscator & De-obfuscator Tests
+  // ==========================================
+
+  test('YAML Obfuscator & De-obfuscator', 'Lossless Bi-directional Obfuscation and De-obfuscation', () => {
+    const yaml = 'db_config:\n  host: prod.internal.net\n  user: admin\n  password: SecretPassword999\n';
+    const result = obfuscateYaml(yaml);
+
+    assertTrue(result.obfuscatedYaml.length > 0, 'Generates obfuscated YAML output');
+    assertTrue(!result.obfuscatedYaml.includes('SecretPassword999'), 'Sensitive password value is masked');
+    assertTrue(!result.obfuscatedYaml.includes('prod.internal.net'), 'Sensitive host value is masked');
+    assertTrue(Boolean(result.mapping.keys['password']), 'Password key is mapped');
+    assertTrue(Boolean(result.mapping.values['SecretPassword999']), 'Password value is mapped');
+
+    const deob = deobfuscateYaml(result.obfuscatedYaml, result.mapping);
+    assertEqual(deob.deobfuscatedYaml.trim(), yaml.trim(), 'De-obfuscated YAML exactly matches original');
+    assertTrue(deob.restoredCount > 0, 'Restored tokens count is greater than zero');
+  });
+
+  test('YAML Obfuscator & De-obfuscator', 'Sensitive Value Masking vs Excluded Structural Keys', () => {
+    const k8sManifest = `apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+  namespace: production
+data:
+  api_key: sk_live_998877665544332211
+  jwt_secret: secret_token_xyz_8877
+`;
+    const result = obfuscateYaml(k8sManifest);
+
+    // Structural keys must be preserved
+    assertTrue(result.obfuscatedYaml.includes('apiVersion: v1'), 'Preserves apiVersion key');
+    assertTrue(result.obfuscatedYaml.includes('kind: Secret'), 'Preserves kind key');
+    assertTrue(result.obfuscatedYaml.includes('metadata:'), 'Preserves metadata key');
+    assertTrue(result.obfuscatedYaml.includes('name: app-secret'), 'Preserves standard name key');
+
+    // Sensitive values must be obfuscated
+    assertTrue(!result.obfuscatedYaml.includes('sk_live_998877665544332211'), 'API key value is masked');
+    assertTrue(!result.obfuscatedYaml.includes('secret_token_xyz_8877'), 'JWT secret value is masked');
+
+    const deob = deobfuscateYaml(result.obfuscatedYaml, result.mapping);
+    assertEqual(deob.deobfuscatedYaml.trim(), k8sManifest.trim(), 'De-obfuscates Kubernetes manifest perfectly');
+  });
+
+  test('YAML Obfuscator & De-obfuscator', 'Configuration Export & Import Roundtrip with Full Mappings', () => {
+    const yaml = 'service:\n  name: auth-service\n  token: token_val_abc\n';
+    const result = obfuscateYaml(yaml);
+
+    const configExport = createYamlConfigExport(result.mapping, 'CI/CD Profile', 'Test profile for CI pipeline');
+    assertEqual(configExport.format, 'devhub-yaml-obfuscator-config', 'Format identifier matches');
+    assertEqual(configExport.version, 1, 'Version is 1');
+    assertEqual(configExport.name, 'CI/CD Profile', 'Name is preserved in export');
+    assertTrue(Object.keys(configExport.mappings.values).length > 0, 'Export includes value mappings');
+
+    const jsonString = JSON.stringify(configExport, null, 2);
+    const parseRes = validateAndParseYamlConfig(jsonString);
+
+    assertTrue(parseRes.success, 'Validates and parses exported JSON config');
+    assertTrue(Boolean(parseRes.config), 'Parsed config is present');
+    assertTrue(Boolean(parseRes.mapping), 'Parsed mapping is reconstructed');
+    assertEqual(parseRes.config?.name, 'CI/CD Profile', 'Config name preserved');
+
+    // De-obfuscate using reconstructed mapping from parsed JSON
+    const restored = deobfuscateYaml(result.obfuscatedYaml, parseRes.mapping!);
+    assertEqual(restored.deobfuscatedYaml.trim(), yaml.trim(), 'De-obfuscation works with imported mapping');
+  });
+
+  test('YAML Obfuscator & De-obfuscator', 'Multi-Document YAML and Anchor/Alias Masking', () => {
+    const yaml = `default_settings: &default_cfg
+  timeout: 30
+
+service:
+  <<: *default_cfg
+  name: my-app
+---
+second_doc:
+  active: true
+`;
+    const result = obfuscateYaml(yaml);
+
+    assertTrue(result.obfuscatedYaml.includes('---'), 'Preserves multi-document separator ---');
+    assertTrue(Boolean(result.mapping.anchors['default_cfg']), 'Anchor default_cfg is mapped');
+    assertTrue(!result.obfuscatedYaml.includes('&default_cfg'), 'Original anchor name is masked');
+
+    const deob = deobfuscateYaml(result.obfuscatedYaml, result.mapping);
+    assertEqual(deob.deobfuscatedYaml.trim(), yaml.trim(), 'Multi-document YAML and anchors roundtrip accurately');
+  });
+
+  test('YAML Obfuscator & De-obfuscator', 'Naming Styles and Identifier Generation', () => {
+    const optsPrefixed = { ...DEFAULT_YAML_OBFUSCATOR_OPTIONS, namingStyle: 'prefixed' as const, keyPrefix: 'field_' };
+    const idPrefixed = generateObfuscatedIdentifier('key', 1, 'username', optsPrefixed);
+    assertEqual(idPrefixed, 'field_1', 'Prefixed naming style generates expected format');
+
+    const optsHex = { ...DEFAULT_YAML_OBFUSCATOR_OPTIONS, namingStyle: 'random_hex' as const, keyPrefix: 'k_' };
+    const idHex = generateObfuscatedIdentifier('key', 1, 'secret_pass', optsHex);
+    assertTrue(idHex.startsWith('k_'), 'Random hex style uses keyPrefix');
+    assertEqual(idHex.length, 8, 'Random hex style produces k_ plus 6 hex chars');
+
+    assertTrue(isSensitiveKey('db_password', DEFAULT_YAML_OBFUSCATOR_OPTIONS.sensitiveKeyPatterns), 'Identifies password key as sensitive');
+    assertTrue(isSensitiveKey('api_token', DEFAULT_YAML_OBFUSCATOR_OPTIONS.sensitiveKeyPatterns), 'Identifies api_token as sensitive');
+    assertTrue(!isSensitiveKey('description', DEFAULT_YAML_OBFUSCATOR_OPTIONS.sensitiveKeyPatterns), 'Identifies description as non-sensitive');
+
+    assertTrue(isSensitiveValuePattern('https://api.example.com/v1/auth?token=123'), 'Identifies sensitive URL pattern');
+    assertTrue(isSensitiveValuePattern('user@domain.com'), 'Identifies sensitive email pattern');
   });
 
   const durationMs = Math.round((performance.now() - startTime) * 100) / 100;

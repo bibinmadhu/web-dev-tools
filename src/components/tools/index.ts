@@ -38,4 +38,5 @@ export * from './json-editor/JsonEditorTool';
 export * from './csv-auto-populator/CsvAutoPopulatorTool';
 export * from './DbRowCopyTool';
 export * from './db-delete-query-generator/DbDeleteQueryGeneratorTool';
+export * from './yaml-obfuscator/YamlObfuscatorTool';
 export * from './GenericTool';

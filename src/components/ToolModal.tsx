@@ -42,6 +42,7 @@ import {
   CsvAutoPopulatorTool,
   DbRowCopyTool,
   DbDeleteQueryGeneratorTool,
+  YamlObfuscatorTool,
   GenericTool,
 } from './tools';
 
@@ -156,6 +157,14 @@ export const ToolModal: React.FC<ToolModalProps> = ({
         return false;
       }
     }
+    if (tool.id === 'yaml-obfuscator') {
+      try {
+        const saved = localStorage.getItem('devhub_fullscreen_yaml_obfuscator');
+        return saved !== null ? saved === 'true' : false;
+      } catch (e) {
+        return false;
+      }
+    }
     return false;
   });
 
@@ -265,6 +274,13 @@ export const ToolModal: React.FC<ToolModalProps> = ({
       } catch (e) {
         setIsFullScreen(false);
       }
+    } else if (tool?.id === 'yaml-obfuscator') {
+      try {
+        const saved = localStorage.getItem('devhub_fullscreen_yaml_obfuscator');
+        setIsFullScreen(saved !== null ? saved === 'true' : false);
+      } catch (e) {
+        setIsFullScreen(false);
+      }
     } else {
       setIsFullScreen(false);
     }
@@ -360,6 +376,12 @@ export const ToolModal: React.FC<ToolModalProps> = ({
       } else if (tool?.id === 'db-delete-query-generator') {
         try {
           localStorage.setItem('devhub_fullscreen_db_delete', String(next));
+        } catch (e) {
+          // ignore
+        }
+      } else if (tool?.id === 'yaml-obfuscator') {
+        try {
+          localStorage.setItem('devhub_fullscreen_yaml_obfuscator', String(next));
         } catch (e) {
           // ignore
         }
@@ -537,6 +559,13 @@ export const ToolModal: React.FC<ToolModalProps> = ({
             onToggleFullScreen={handleToggleFullScreen}
           />
         );
+      case 'yaml-obfuscator':
+        return (
+          <YamlObfuscatorTool
+            isFullScreen={isFullScreen}
+            onToggleFullScreen={handleToggleFullScreen}
+          />
+        );
       default:
         return <GenericTool tool={tool} />;
     }
@@ -570,6 +599,7 @@ export const ToolModal: React.FC<ToolModalProps> = ({
     'java-formatter',
     'code-formatter',
     'multi-obfuscator',
+    'yaml-obfuscator',
     'qr-generator'
   ].includes(tool.id);
 

@@ -237,6 +237,7 @@ export const ClipboardManagerOverlay: React.FC<ClipboardManagerOverlayProps> = (
       case 'jwt':
         return TOOLS_DATA.find((t) => t.id === 'jwt-decoder') || null;
       case 'yaml':
+        return TOOLS_DATA.find((t) => t.id === 'yaml-obfuscator') || null;
       case 'html':
       case 'css':
       case 'javascript':

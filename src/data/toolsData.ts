@@ -82,6 +82,16 @@ export const TOOLS_DATA: DevTool[] = [
     isPopular: true,
   },
   {
+    id: 'yaml-obfuscator',
+    name: 'YAML Obfuscator & De-obfuscator',
+    description: 'Obfuscate & de-obfuscate YAML manifests (Kubernetes, Docker Compose, CI/CD) with reversible key & sensitive value masking, mapping manager and config import/export',
+    category: 'security',
+    tags: ['YAML', 'Security', 'Obfuscator', 'Deobfuscate', 'Kubernetes', 'Docker', 'CI/CD', 'Mapping', 'Config'],
+    iconText: 'YML🛡️',
+    iconType: 'shield',
+    isPopular: true,
+  },
+  {
     id: 'code-formatter',
     name: 'Code Format',
     description: 'Format & beautify Python, YAML, Java, JavaScript/TS, JSON, HTML, CSS, SQL & Markdown',
