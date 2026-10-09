@@ -20,7 +20,7 @@ import YAML, {
 
 export type YamlNamingStyle = 'prefixed' | 'random_hex' | 'pseudonym' | 'alphabetical' | 'hash';
 
-export type YamlValueMode = 'sensitive_only' | 'all_strings' | 'custom_keys_only' | 'none';
+export type YamlValueMode = 'all_values' | 'all_strings' | 'sensitive_only' | 'custom_keys_only' | 'none';
 
 export type YamlCommentHandling = 'preserve' | 'strip' | 'mask';
 
@@ -470,9 +470,8 @@ export function obfuscateYaml(
           if (typeof val === 'string') {
             const keyIsSensitive = Boolean(parentKeyName && isSensitiveKey(parentKeyName, options.sensitiveKeyPatterns));
             const valIsSensitive = isSensitiveValuePattern(val);
-            const isCandidate = options.valueMode === 'all_strings' || keyIsSensitive || valIsSensitive;
 
-            if (isCandidate && val.trim() !== '' && !detectedValues.includes(val)) {
+            if (val.trim() !== '' && !detectedValues.includes(val)) {
               detectedValues.push(val);
             }
 
@@ -481,7 +480,7 @@ export function obfuscateYaml(
               let shouldObfuscate = false;
 
               if (!isExcludedVal) {
-                if (options.valueMode === 'all_strings') {
+                if (options.valueMode === 'all_strings' || options.valueMode === 'all_values') {
                   shouldObfuscate = true;
                 } else if (options.valueMode === 'sensitive_only') {
                   shouldObfuscate = keyIsSensitive || valIsSensitive;
@@ -518,9 +517,8 @@ export function obfuscateYaml(
           if (isScalar(item) && typeof item.value === 'string') {
             const val = item.value;
             const valIsSensitive = isSensitiveValuePattern(val);
-            const isCandidate = options.valueMode === 'all_strings' || valIsSensitive;
 
-            if (isCandidate && val.trim() !== '' && !detectedValues.includes(val)) {
+            if (val.trim() !== '' && !detectedValues.includes(val)) {
               detectedValues.push(val);
             }
 
@@ -528,7 +526,7 @@ export function obfuscateYaml(
               const isExcludedVal = excludedValuesSet.has(val.trim().toLowerCase());
               let shouldObf = false;
               if (!isExcludedVal) {
-                if (options.valueMode === 'all_strings') {
+                if (options.valueMode === 'all_strings' || options.valueMode === 'all_values') {
                   shouldObf = true;
                 } else if (options.valueMode === 'sensitive_only') {
                   shouldObf = valIsSensitive;
@@ -692,8 +690,12 @@ function fallbackRegexObfuscate(
         (ev) => ev.trim().toLowerCase() === cleanVal.toLowerCase()
       );
       if (!isExcludedVal) {
-        const isSens = isSensitiveKey(key, options.sensitiveKeyPatterns) || isSensitiveValuePattern(cleanVal);
-        if (isSens) {
+        const isCandidate =
+          options.valueMode === 'all_strings' ||
+          options.valueMode === 'all_values' ||
+          isSensitiveKey(key, options.sensitiveKeyPatterns) ||
+          isSensitiveValuePattern(cleanVal);
+        if (isCandidate) {
           if (!valuesMap[cleanVal]) {
             valCounter++;
             const obfVal = generateObfuscatedIdentifier('value', valCounter, cleanVal, options);

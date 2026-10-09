@@ -6057,6 +6057,64 @@ CREATE TABLE "size_test" (
     assertTrue(!resKeysOnly.obfuscatedYaml.includes('api_key:'), 'Keys masked when obfuscateKeys is true');
   });
 
+  test('YAML Obfuscator & De-obfuscator', 'Obfuscate All Values Option in YAML', () => {
+    const yaml = `application:
+  name: payment-microservice
+  environment: production
+  cluster: eu-west-1a
+  api_key: sk_secret_token_9988
+`;
+    // In sensitive_only mode (default), name and cluster are not sensitive
+    const resSensitive = obfuscateYaml(yaml, { valueMode: 'sensitive_only' });
+    assertTrue(resSensitive.obfuscatedYaml.includes('payment-microservice'), 'Non-sensitive name preserved in sensitive-only mode');
+    assertTrue(!resSensitive.obfuscatedYaml.includes('sk_secret_token_9988'), 'Sensitive token masked');
+
+    // In all_values mode, ALL values are obfuscated
+    const resAllValues = obfuscateYaml(yaml, { valueMode: 'all_values' });
+    assertTrue(!resAllValues.obfuscatedYaml.includes('payment-microservice'), 'All values mode obfuscates payment-microservice');
+    assertTrue(!resAllValues.obfuscatedYaml.includes('production'), 'All values mode obfuscates production');
+    assertTrue(!resAllValues.obfuscatedYaml.includes('eu-west-1a'), 'All values mode obfuscates cluster name');
+    assertTrue(!resAllValues.obfuscatedYaml.includes('sk_secret_token_9988'), 'All values mode obfuscates API token');
+    assertTrue(resAllValues.obfuscatedYaml.includes('name:'), 'Property keys are preserved by default');
+
+    // De-obfuscate all values roundtrip
+    const deob = deobfuscateYaml(resAllValues.obfuscatedYaml, resAllValues.mapping);
+    assertEqual(deob.deobfuscatedYaml.trim(), yaml.trim(), 'All values mode restores 100% losslessly');
+  });
+
+  test('YAML Obfuscator & De-obfuscator', 'Remove Obfuscation for Some or All Values', () => {
+    const yaml = `services:
+  database:
+    host: pg-cluster.corp.net
+    user: db_master
+    password: SuperSecretPassword!
+`;
+    const initial = obfuscateYaml(yaml, { valueMode: 'all_values' });
+    assertTrue(initial.detectedValues.length >= 3, 'Detects all candidate values');
+    assertTrue(!initial.obfuscatedYaml.includes('pg-cluster.corp.net'), 'Host is initially obfuscated');
+    assertTrue(!initial.obfuscatedYaml.includes('db_master'), 'User is initially obfuscated');
+    assertTrue(!initial.obfuscatedYaml.includes('SuperSecretPassword!'), 'Password is initially obfuscated');
+
+    // 1. Remove obfuscation for SOME values (e.g. host and user kept plaintext)
+    const resSomeExcluded = obfuscateYaml(yaml, {
+      valueMode: 'all_values',
+      excludedValues: ['pg-cluster.corp.net', 'db_master'],
+    });
+    assertTrue(resSomeExcluded.obfuscatedYaml.includes('pg-cluster.corp.net'), 'Host is kept in plaintext');
+    assertTrue(resSomeExcluded.obfuscatedYaml.includes('db_master'), 'User is kept in plaintext');
+    assertTrue(!resSomeExcluded.obfuscatedYaml.includes('SuperSecretPassword!'), 'Password remains obfuscated');
+
+    // 2. Remove obfuscation for ALL values
+    const resAllExcluded = obfuscateYaml(yaml, {
+      valueMode: 'all_values',
+      excludedValues: initial.detectedValues,
+    });
+    assertTrue(resAllExcluded.obfuscatedYaml.includes('pg-cluster.corp.net'), 'All values plaintext: host preserved');
+    assertTrue(resAllExcluded.obfuscatedYaml.includes('db_master'), 'All values plaintext: user preserved');
+    assertTrue(resAllExcluded.obfuscatedYaml.includes('SuperSecretPassword!'), 'All values plaintext: password preserved');
+    assertEqual(resAllExcluded.replacementsCount, 0, 'Zero replacements when obfuscation removed for all values');
+  });
+
   test('YAML Obfuscator & De-obfuscator', 'Sensitive Value Masking vs Excluded Structural Keys', () => {
     const k8sManifest = `apiVersion: v1
 kind: Secret

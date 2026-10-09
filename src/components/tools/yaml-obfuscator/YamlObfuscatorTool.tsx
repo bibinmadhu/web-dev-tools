@@ -37,6 +37,7 @@ import {
   Ban,
   CheckSquare,
   Square,
+  X,
 } from 'lucide-react';
 import {
   obfuscateYaml,
@@ -120,7 +121,9 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
   const [newExcludedKey, setNewExcludedKey] = useState<string>('');
   const [newExcludedValue, setNewExcludedValue] = useState<string>('');
   const [detectedValuesList, setDetectedValuesList] = useState<string[]>([]);
-  const [showSelectiveValuesDrawer, setShowSelectiveValuesDrawer] = useState<boolean>(false);
+  const [showSelectiveValuesDrawer, setShowSelectiveValuesDrawer] = useState<boolean>(true);
+  const [valueFilterText, setValueFilterText] = useState<string>('');
+  const [valueStatusFilter, setValueStatusFilter] = useState<'all' | 'masked' | 'excluded'>('all');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -356,6 +359,94 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
     setMapping(res.mapping);
     setDetectedValuesList(res.detectedValues);
   };
+
+  const handleToggleAllValuesMode = (enableAll: boolean) => {
+    const updatedOptions: YamlObfuscatorOptions = {
+      ...options,
+      obfuscateValues: true,
+      valueMode: enableAll ? 'all_values' : 'sensitive_only',
+    };
+    setOptions(updatedOptions);
+    const res = obfuscateYaml(sourceYaml, updatedOptions, mapping || undefined);
+    setObfuscatedYaml(res.obfuscatedYaml);
+    setMapping(res.mapping);
+    setDetectedValuesList(res.detectedValues);
+  };
+
+  const handleObfuscateAllValues = () => {
+    const updatedOptions: YamlObfuscatorOptions = {
+      ...options,
+      obfuscateValues: true,
+      valueMode: 'all_values',
+      excludedValues: [],
+    };
+    setOptions(updatedOptions);
+    const res = obfuscateYaml(sourceYaml, updatedOptions, mapping || undefined);
+    setObfuscatedYaml(res.obfuscatedYaml);
+    setMapping(res.mapping);
+    setDetectedValuesList(res.detectedValues);
+  };
+
+  const handleObfuscateSensitiveOnly = () => {
+    const updatedOptions: YamlObfuscatorOptions = {
+      ...options,
+      obfuscateValues: true,
+      valueMode: 'sensitive_only',
+      excludedValues: [],
+    };
+    setOptions(updatedOptions);
+    const res = obfuscateYaml(sourceYaml, updatedOptions, mapping || undefined);
+    setObfuscatedYaml(res.obfuscatedYaml);
+    setMapping(res.mapping);
+    setDetectedValuesList(res.detectedValues);
+  };
+
+  const handleRemoveAllValuesObfuscation = () => {
+    const currentExcluded = options.excludedValues || [];
+    const set = new Set(currentExcluded.map((v) => v.toLowerCase()));
+    const toAdd = detectedValuesList.filter((v) => !set.has(v.toLowerCase()));
+    const updated = [...currentExcluded, ...toAdd];
+    const updatedOptions: YamlObfuscatorOptions = { ...options, excludedValues: updated };
+    setOptions(updatedOptions);
+    const res = obfuscateYaml(sourceYaml, updatedOptions, mapping || undefined);
+    setObfuscatedYaml(res.obfuscatedYaml);
+    setMapping(res.mapping);
+    setDetectedValuesList(res.detectedValues);
+  };
+
+  const isAllValuesMode = options.valueMode === 'all_values' || options.valueMode === 'all_strings';
+
+  const excludedValuesSet = useMemo(() => {
+    return new Set((options.excludedValues || []).map((v) => v.toLowerCase()));
+  }, [options.excludedValues]);
+
+  const { maskedValuesCount, excludedValuesCount } = useMemo(() => {
+    let masked = 0;
+    let excluded = 0;
+    detectedValuesList.forEach((v) => {
+      if (excludedValuesSet.has(v.toLowerCase())) {
+        excluded++;
+      } else if (options.obfuscateValues) {
+        masked++;
+      } else {
+        excluded++;
+      }
+    });
+    return { maskedValuesCount: masked, excludedValuesCount: excluded };
+  }, [detectedValuesList, excludedValuesSet, options.obfuscateValues]);
+
+  const filteredDetectedValues = useMemo(() => {
+    return detectedValuesList.filter((val) => {
+      const isExcluded = excludedValuesSet.has(val.toLowerCase());
+      const isMasked = options.obfuscateValues && !isExcluded;
+      if (valueStatusFilter === 'masked' && !isMasked) return false;
+      if (valueStatusFilter === 'excluded' && !isExcluded) return false;
+      if (valueFilterText.trim()) {
+        return val.toLowerCase().includes(valueFilterText.trim().toLowerCase());
+      }
+      return true;
+    });
+  }, [detectedValuesList, excludedValuesSet, options.obfuscateValues, valueStatusFilter, valueFilterText]);
 
   // Run initial obfuscation on mount if empty
   useEffect(() => {
@@ -829,9 +920,9 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
         </div>
       )}
 
-      {/* QUICK TARGET SCOPE TOOLBAR (Always visible in Obfuscate tab) */}
+      {/* QUICK TARGET SCOPE & ALL VALUES TOOLBAR (Always visible in Obfuscate tab) */}
       {activeTab === 'obfuscate' && (
-        <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs shrink-0 shadow-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2.5 px-3.5 py-2.5 bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs shrink-0 shadow-xs">
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <div className="flex items-center gap-1.5 font-bold text-slate-800 dark:text-slate-200">
               <Layers className="w-3.5 h-3.5 text-indigo-500" />
@@ -845,7 +936,7 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
                   ? 'bg-indigo-50 dark:bg-indigo-950/70 border-indigo-300 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 shadow-2xs'
                   : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 hover:bg-slate-100'
               }`}
-              title="Obfuscate sensitive values and secrets"
+              title="Obfuscate values (Client-specific data - Default: Enabled)"
             >
               <input
                 type="checkbox"
@@ -860,7 +951,7 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
                 }}
                 className="rounded text-indigo-600 focus:ring-indigo-500"
               />
-              <span>Values</span>
+              <span className="font-semibold">Values</span>
               <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 font-semibold">
                 Default
               </span>
@@ -873,7 +964,7 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
                   ? 'bg-indigo-50 dark:bg-indigo-950/70 border-indigo-300 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 shadow-2xs'
                   : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-500 hover:bg-slate-100'
               }`}
-              title="Obfuscate YAML dictionary property keys"
+              title="Obfuscate YAML dictionary property keys (Default: Disabled)"
             >
               <input
                 type="checkbox"
@@ -894,8 +985,8 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
               </span>
             </label>
 
-            {/* Quick Presets */}
-            <div className="hidden md:flex items-center gap-1 border-l border-slate-200 dark:border-slate-800 pl-2.5">
+            {/* Scope Presets */}
+            <div className="hidden lg:flex items-center gap-1 border-l border-slate-200 dark:border-slate-800 pl-2">
               <button
                 onClick={() => handleSetObfuscationScope('values_only')}
                 className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
@@ -903,7 +994,7 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
                     ? 'bg-indigo-600 text-white font-semibold'
                     : 'bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
-                title="Only mask sensitive values while keeping YAML property names recognizable"
+                title="Default: Obfuscate values only, keys preserved"
               >
                 Values Only
               </button>
@@ -914,7 +1005,7 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
                     ? 'bg-indigo-600 text-white font-semibold'
                     : 'bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
-                title="Obfuscate both keys and values"
+                title="Obfuscate both property keys and values"
               >
                 Keys &amp; Values
               </button>
@@ -930,24 +1021,86 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
                 Keys Only
               </button>
             </div>
+
+            {/* OPTION TO OBFUSCATE ALL VALUES IN YAML */}
+            {options.obfuscateValues && (
+              <div className="flex items-center gap-1.5 pl-2 sm:border-l border-slate-200 dark:border-slate-800">
+                <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-400">
+                  Value Scope:
+                </span>
+                <div className="inline-flex bg-slate-100 dark:bg-slate-900 p-0.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                  <button
+                    onClick={() => handleToggleAllValuesMode(true)}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1 ${
+                      isAllValuesMode
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                    title="Obfuscate ALL values in the YAML (all strings and data)"
+                  >
+                    <Sparkles className="w-3 h-3" />
+                    <span>All Values in YAML</span>
+                  </button>
+                  <button
+                    onClick={() => handleToggleAllValuesMode(false)}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1 ${
+                      !isAllValuesMode
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                    }`}
+                    title="Obfuscate sensitive values only (passwords, tokens, credentials, URLs)"
+                  >
+                    <Shield className="w-3 h-3" />
+                    <span>Sensitive Only</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
-          {/* Toggle Selective Values Drawer */}
+          {/* Right: Quick Action Buttons to Remove Obfuscation for All or Manage Specific */}
           <div className="flex items-center gap-2">
+            {/* One-click button: Remove Obfuscation for All Values */}
+            <button
+              onClick={handleRemoveAllValuesObfuscation}
+              disabled={detectedValuesList.length === 0 || maskedValuesCount === 0}
+              className="px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer flex items-center gap-1.5 border border-rose-300 dark:border-rose-800/80 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 dark:hover:bg-rose-950/70 text-rose-700 dark:text-rose-300 disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Remove obfuscation for all values in this YAML (keeps all values plaintext)"
+            >
+              <EyeOff className="w-3.5 h-3.5 text-rose-500" />
+              <span>Remove Obfuscation for All</span>
+            </button>
+
+            {/* One-click button: Obfuscate All Values */}
+            <button
+              onClick={handleObfuscateAllValues}
+              disabled={detectedValuesList.length === 0}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer flex items-center gap-1.5 border ${
+                isAllValuesMode && options.excludedValues?.length === 0
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                  : 'bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:bg-slate-100'
+              }`}
+              title="Obfuscate all values in YAML with no exclusions"
+            >
+              <Layers className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Obfuscate All Values</span>
+            </button>
+
+            {/* Toggle Values Exceptions Drawer */}
             <button
               onClick={() => setShowSelectiveValuesDrawer(!showSelectiveValuesDrawer)}
               className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors cursor-pointer flex items-center gap-1.5 border ${
-                showSelectiveValuesDrawer || (options.excludedValues && options.excludedValues.length > 0)
-                  ? 'bg-amber-50 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-800'
+                showSelectiveValuesDrawer
+                  ? 'bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 border-amber-300 dark:border-amber-800'
                   : 'bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:bg-slate-100'
               }`}
-              title="Click to view candidate values and selectively disable obfuscation"
+              title="Toggle value-by-value selective obfuscation manager"
             >
               <EyeOff className="w-3.5 h-3.5 text-amber-500" />
-              <span>Disable Specific Values</span>
-              {options.excludedValues && options.excludedValues.length > 0 && (
+              <span>{showSelectiveValuesDrawer ? 'Hide Values Manager' : 'Manage Values'}</span>
+              {excludedValuesCount > 0 && (
                 <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-white font-mono text-[10px] font-bold">
-                  {options.excludedValues.length}
+                  {excludedValuesCount} plaintext
                 </span>
               )}
             </button>
@@ -955,115 +1108,220 @@ export const YamlObfuscatorTool: React.FC<YamlObfuscatorToolProps> = ({
         </div>
       )}
 
-      {/* SELECTIVE VALUE OBFUSCATION DRAWER (When open) */}
+      {/* VALUES MANAGEMENT & PLAINTEXT EXCEPTIONS DRAWER (In Obfuscate tab) */}
       {activeTab === 'obfuscate' && showSelectiveValuesDrawer && (
-        <div className="bg-amber-50/60 dark:bg-slate-950 border border-amber-200 dark:border-amber-800/60 rounded-xl p-3.5 space-y-3 shrink-0 text-xs shadow-xs animate-in fade-in duration-100">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-200 dark:border-slate-800 pb-2">
-            <div>
-              <div className="flex items-center gap-2">
-                <EyeOff className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-                <span className="font-bold text-slate-900 dark:text-white">
-                  Selective Value Obfuscation Manager
+        <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-3.5 space-y-3 shrink-0 text-xs shadow-xs animate-in fade-in duration-100">
+          {/* Header bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800/80 pb-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1.5 font-bold text-slate-900 dark:text-white">
+                <EyeOff className="w-4 h-4 text-amber-500" />
+                <span>Values Obfuscation &amp; Plaintext Exceptions</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-900 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-800">
+                  {detectedValuesList.length} Total Values
                 </span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-200 dark:bg-amber-950 text-amber-800 dark:text-amber-300">
-                  {detectedValuesList.length} values detected in YAML
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 font-semibold">
+                  {maskedValuesCount} Masked
+                </span>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800 font-semibold">
+                  {excludedValuesCount} Plaintext (Obfuscation Removed)
                 </span>
               </div>
-              <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5">
-                Disable obfuscation for specific values to keep them in plaintext (e.g. hostnames, environments, public constants).
-              </p>
             </div>
 
-            <div className="flex items-center gap-1.5">
+            {/* Action buttons */}
+            <div className="flex flex-wrap items-center gap-1.5">
               <button
-                onClick={handleExcludeAllDetectedValues}
-                className="px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-slate-700 text-[11px] font-medium cursor-pointer"
+                onClick={handleRemoveAllValuesObfuscation}
+                disabled={detectedValuesList.length === 0 || maskedValuesCount === 0}
+                className="px-2.5 py-1 rounded bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/50 dark:hover:bg-rose-950/80 text-rose-700 dark:text-rose-300 border border-rose-300 dark:border-rose-800 text-[11px] font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Remove obfuscation for all values in YAML"
               >
-                Disable All Detected
+                <Ban className="w-3 h-3 text-rose-500" />
+                <span>Remove Obfuscation for All Values</span>
               </button>
               <button
-                onClick={handleClearAllExcludedValues}
-                className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 text-[11px] font-medium cursor-pointer"
+                onClick={handleObfuscateAllValues}
+                className="px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:hover:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-800 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                title="Obfuscate all values across the entire YAML"
               >
-                Obfuscate All (Reset)
+                <Sparkles className="w-3 h-3 text-indigo-500" />
+                <span>Obfuscate All Values</span>
+              </button>
+              <button
+                onClick={handleObfuscateSensitiveOnly}
+                className="px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                title="Reset to sensitive-values-only obfuscation (Default)"
+              >
+                <Shield className="w-3 h-3 text-emerald-500" />
+                <span>Obfuscate Sensitive Only</span>
+              </button>
+              {excludedValuesCount > 0 && (
+                <button
+                  onClick={handleClearAllExcludedValues}
+                  className="px-2 py-1 rounded text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 text-[11px] font-medium flex items-center gap-1 cursor-pointer"
+                  title="Clear all value exclusions"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Reset Exclusions</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Filter, search and custom exclusion row */}
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            {/* Search & Status Filter */}
+            <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[280px]">
+              <div className="relative flex-1 min-w-[160px] max-w-xs">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+                <input
+                  type="text"
+                  value={valueFilterText}
+                  onChange={(e) => setValueFilterText(e.target.value)}
+                  placeholder="Search candidate values..."
+                  className="w-full bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg pl-8 pr-2.5 py-1 text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:border-indigo-500 font-mono"
+                />
+              </div>
+
+              <div className="inline-flex bg-slate-100 dark:bg-slate-900 p-0.5 rounded-lg border border-slate-200 dark:border-slate-800 text-[11px]">
+                <button
+                  onClick={() => setValueStatusFilter('all')}
+                  className={`px-2 py-0.5 rounded font-medium cursor-pointer ${
+                    valueStatusFilter === 'all'
+                      ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-2xs font-bold'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  All ({detectedValuesList.length})
+                </button>
+                <button
+                  onClick={() => setValueStatusFilter('masked')}
+                  className={`px-2 py-0.5 rounded font-medium cursor-pointer ${
+                    valueStatusFilter === 'masked'
+                      ? 'bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 shadow-2xs font-bold'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  Masked ({maskedValuesCount})
+                </button>
+                <button
+                  onClick={() => setValueStatusFilter('excluded')}
+                  className={`px-2 py-0.5 rounded font-medium cursor-pointer ${
+                    valueStatusFilter === 'excluded'
+                      ? 'bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 shadow-2xs font-bold'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  Plaintext ({excludedValuesCount})
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Add Custom Excluded Value */}
+            <div className="flex items-center gap-1.5 flex-1 min-w-[260px] max-w-md">
+              <input
+                type="text"
+                value={newExcludedValue}
+                onChange={(e) => setNewExcludedValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleAddExcludedValue();
+                }}
+                placeholder="Add custom value to keep plaintext..."
+                className="flex-1 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-900 dark:text-slate-100 placeholder-slate-400 focus:outline-none focus:border-amber-500 font-mono"
+              />
+              <button
+                onClick={() => handleAddExcludedValue()}
+                disabled={!newExcludedValue.trim()}
+                className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors shrink-0"
+              >
+                Exclude
               </button>
             </div>
           </div>
 
-          {/* Quick Add Custom Excluded Value input */}
-          <div className="flex flex-wrap items-center gap-2 bg-white dark:bg-slate-900/60 p-2.5 rounded-lg border border-amber-200 dark:border-slate-800">
-            <span className="font-semibold text-slate-700 dark:text-slate-300 text-[11px]">
-              Add Value to Exclude:
-            </span>
-            <input
-              type="text"
-              value={newExcludedValue}
-              onChange={(e) => setNewExcludedValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleAddExcludedValue();
-              }}
-              placeholder="e.g. staging-cluster.internal, 8080, production, admin"
-              className="flex-1 min-w-[200px] bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1 text-xs font-mono focus:outline-none focus:border-amber-500 text-slate-900 dark:text-slate-100"
-            />
-            <button
-              onClick={() => handleAddExcludedValue()}
-              disabled={!newExcludedValue.trim()}
-              className="px-3 py-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white rounded text-xs font-semibold cursor-pointer transition-colors"
-            >
-              Add Exclusion
-            </button>
+          {/* Quick suggestions */}
+          <div className="flex items-center gap-1 text-[10px] text-slate-500 flex-wrap">
+            <span className="font-medium">Quick Exclude:</span>
+            {['production', 'staging', 'development', 'localhost', 'postgres', 'latest', 'admin', '8080'].map((s) => {
+              const isExcluded = excludedValuesSet.has(s.toLowerCase());
+              return (
+                <button
+                  key={s}
+                  onClick={() => handleToggleValueExcluded(s)}
+                  className={`px-1.5 py-0.5 rounded font-mono transition-colors cursor-pointer border ${
+                    isExcluded
+                      ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-800 font-bold'
+                      : 'bg-slate-100 dark:bg-slate-900 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800'
+                  }`}
+                >
+                  {isExcluded ? '✓ ' : '+'}{s}
+                </button>
+              );
+            })}
           </div>
 
-          {/* Detected Candidate Values Grid */}
+          {/* Interactive Value Chips Grid */}
           <div className="space-y-1">
             <div className="flex items-center justify-between text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-              <span>Candidate Values Found in YAML Source:</span>
-              <span className="text-slate-400 font-normal">Check = Mask | Uncheck = Plaintext</span>
+              <span>Click any value chip below to toggle its obfuscation:</span>
+              <span className="text-[10px] text-slate-400 font-normal">
+                <span className="text-indigo-600 dark:text-indigo-400 font-semibold">Masked</span> (Click to keep plaintext) | <span className="text-amber-600 dark:text-amber-400 font-semibold">Plaintext</span> (Click to obfuscate)
+              </span>
             </div>
 
             {detectedValuesList.length === 0 ? (
-              <div className="p-4 bg-white dark:bg-slate-900/60 rounded-lg border border-slate-200 dark:border-slate-800 text-center text-slate-400 text-xs">
-                No values detected yet. Paste YAML on the left to see candidate values.
+              <div className="p-3 bg-slate-50 dark:bg-slate-900/40 rounded-lg border border-slate-200 dark:border-slate-800 text-center text-slate-400 text-xs">
+                No values detected in YAML source yet. Paste YAML on the left to see detected candidate values.
+              </div>
+            ) : filteredDetectedValues.length === 0 ? (
+              <div className="p-3 bg-slate-50 dark:bg-slate-900/40 rounded-lg border border-slate-200 dark:border-slate-800 text-center text-slate-400 text-xs">
+                No values match the current search filter.
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-48 overflow-y-auto p-1.5 bg-white dark:bg-slate-900/60 rounded-lg border border-slate-200 dark:border-slate-800">
-                {detectedValuesList.map((val) => {
-                  const isExcluded = (options.excludedValues || []).some(
-                    (ev) => ev.toLowerCase() === val.toLowerCase()
-                  );
+              <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto p-2 bg-slate-50 dark:bg-slate-900/60 rounded-lg border border-slate-200 dark:border-slate-800">
+                {filteredDetectedValues.map((val) => {
+                  const isExcluded = excludedValuesSet.has(val.toLowerCase());
                   const isMasked = options.obfuscateValues && !isExcluded;
 
                   return (
-                    <div
+                    <button
                       key={val}
+                      type="button"
                       onClick={() => handleToggleValueExcluded(val)}
-                      className={`p-2 rounded-md border flex items-center justify-between gap-2 cursor-pointer transition-colors text-[11px] ${
+                      className={`group px-2 py-1 rounded-md border text-xs font-mono flex items-center gap-1.5 transition-all cursor-pointer select-none ${
                         isExcluded
-                          ? 'bg-amber-50/80 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800/80 text-amber-900 dark:text-amber-200'
-                          : 'bg-slate-50 dark:bg-slate-950/80 border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 hover:border-indigo-300'
+                          ? 'bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-950/90 border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 shadow-2xs'
+                          : isMasked
+                          ? 'bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-950/90 border-indigo-300 dark:border-indigo-800 text-indigo-900 dark:text-indigo-200 shadow-2xs'
+                          : 'bg-white hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-700 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
                       }`}
+                      title={
+                        isExcluded
+                          ? `Plaintext (Obfuscation removed). Click to enable obfuscation for "${val}"`
+                          : `Currently Masked. Click to REMOVE obfuscation (keep plaintext) for "${val}"`
+                      }
                     >
-                      <div className="flex items-center gap-2 min-w-0">
-                        {isMasked ? (
-                          <CheckSquare className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
-                        ) : (
-                          <Square className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                        )}
-                        <span className="font-mono truncate" title={val}>
-                          {val}
-                        </span>
-                      </div>
-
+                      {isMasked ? (
+                        <CheckSquare className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                      ) : (
+                        <Square className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                      )}
+                      <span className="truncate max-w-[200px]" title={val}>
+                        {val}
+                      </span>
                       <span
-                        className={`text-[9px] px-1.5 py-0.2 rounded font-semibold uppercase tracking-wider shrink-0 ${
+                        className={`text-[9px] px-1 py-0.2 rounded font-sans font-bold uppercase tracking-wider shrink-0 ${
                           isExcluded
-                            ? 'bg-amber-200 dark:bg-amber-900/80 text-amber-900 dark:text-amber-200'
-                            : 'bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300'
+                            ? 'bg-amber-200 dark:bg-amber-900 text-amber-900 dark:text-amber-200'
+                            : 'bg-indigo-200 dark:bg-indigo-900 text-indigo-800 dark:text-indigo-200'
                         }`}
                       >
-                        {isExcluded ? 'Excluded' : 'Masked'}
+                        {isExcluded ? 'Plaintext' : 'Masked'}
                       </span>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
